@@ -33,6 +33,19 @@ class GbaTimerControllerTest {
     }
 
     @Test
+    void bulkTickCountsMultipleOverflows() {
+        GbaMemory memory = GbaMemory.withoutBios(new byte[0]);
+        GbaTimerController timers = new GbaTimerController(memory);
+        memory.write16(0x04000100, 0xFFFE);
+        memory.write16(0x04000102, 1 << 7);
+
+        timers.tick(6);
+
+        assertEquals(0xFFFE, memory.read16(0x04000100));
+        assertEquals(3, timers.overflowCount(0));
+    }
+
+    @Test
     void overflowRequestsInterruptWhenEnabled() {
         GbaMemory memory = GbaMemory.withoutBios(new byte[0]);
         GbaInterruptController interrupts = new GbaInterruptController(memory);

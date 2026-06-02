@@ -48,6 +48,7 @@ class GbaCartridgeHeaderTest {
 
         assertEquals("TEST GAME", cartridge.header().title());
         assertEquals('T', cartridge.rom()[0xA0]);
+        assertEquals(GbaSaveType.NONE, cartridge.saveType());
     }
 
     private static byte[] sampleRom() {

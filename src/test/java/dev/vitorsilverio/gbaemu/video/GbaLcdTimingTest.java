@@ -96,4 +96,30 @@ class GbaLcdTimingTest {
 
         assertEquals(GbaInterrupt.HBLANK.mask(), memory.read16(GbaInterruptController.IF));
     }
+
+    @Test
+    void reportsVblankAndHblankStartEvents() {
+        GbaMemory memory = GbaMemory.withoutBios(new byte[0]);
+        GbaLcdTiming timing = new GbaLcdTiming(memory);
+
+        GbaLcdTiming.Events hblank = timing.tick(960);
+
+        assertEquals(true, hblank.hblankStarted());
+        assertEquals(1, hblank.hblankStartedCount());
+
+        GbaLcdTiming.Events vblank = timing.tick(GbaLcdTiming.CYCLES_PER_SCANLINE * 160);
+
+        assertEquals(true, vblank.vblankStarted());
+        assertEquals(1, vblank.vblankStartedCount());
+    }
+
+    @Test
+    void countsEveryHblankStartCrossedByLargeTicks() {
+        GbaMemory memory = GbaMemory.withoutBios(new byte[0]);
+        GbaLcdTiming timing = new GbaLcdTiming(memory);
+
+        GbaLcdTiming.Events events = timing.tick(GbaLcdTiming.CYCLES_PER_SCANLINE * 3);
+
+        assertEquals(3, events.hblankStartedCount());
+    }
 }

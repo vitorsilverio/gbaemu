@@ -1,5 +1,6 @@
 package dev.vitorsilverio.gbaemu.dma;
 
+import dev.vitorsilverio.gbaemu.audio.GbaAudio;
 import dev.vitorsilverio.gbaemu.memory.GbaMemory;
 import dev.vitorsilverio.gbaemu.interrupt.GbaInterrupt;
 import dev.vitorsilverio.gbaemu.interrupt.GbaInterruptController;
@@ -103,6 +104,42 @@ class GbaDmaControllerTest {
     }
 
     @Test
+    void vblankTransferRunsOnlyWhenVblankIsTriggered() {
+        GbaMemory memory = GbaMemory.withoutBios(new byte[0]);
+        GbaDmaController dma = new GbaDmaController(memory);
+        memory.write16(0x02000000, 0x1234);
+        setupDma(memory, 0, 0x02000000, 0x03000000, 1, (1 << 15) | (1 << 12));
+
+        dma.triggerHblankTransfers();
+
+        assertEquals(0, memory.read16(0x03000000));
+
+        dma.triggerVblankTransfers();
+
+        assertEquals(0x1234, memory.read16(0x03000000));
+        assertEquals(0, memory.read16(0x040000BA) & (1 << 15));
+    }
+
+    @Test
+    void hblankRepeatTransferKeepsChannelEnabledAndReloadsDestination() {
+        GbaMemory memory = GbaMemory.withoutBios(new byte[0]);
+        GbaDmaController dma = new GbaDmaController(memory);
+        memory.write16(0x02000000, 0x1111);
+        memory.write16(0x02000002, 0x2222);
+        setupDma(memory, 1, 0x02000000, 0x03000000, 1, (1 << 15) | (2 << 12) | (1 << 9) | (3 << 5));
+
+        dma.triggerHblankTransfers();
+
+        assertEquals(0x1111, memory.read16(0x03000000));
+        assertEquals(1 << 15, memory.read16(0x040000C6) & (1 << 15));
+        assertEquals(0x03000000, memory.read32(0x040000C0));
+
+        dma.triggerHblankTransfers();
+
+        assertEquals(0x2222, memory.read16(0x03000000));
+    }
+
+    @Test
     void requestsInterruptWhenTransferCompletesWithIrqEnabled() {
         GbaMemory memory = GbaMemory.withoutBios(new byte[0]);
         GbaInterruptController interrupts = new GbaInterruptController(memory);
@@ -113,6 +150,25 @@ class GbaDmaControllerTest {
         dma.triggerImmediateTransfers();
 
         assertEquals(GbaInterrupt.DMA2.mask(), memory.read16(GbaInterruptController.IF));
+    }
+
+    @Test
+    void specialDmaRefillsDirectSoundFifoWithFourWords() {
+        GbaMemory memory = GbaMemory.withoutBios(new byte[0]);
+        GbaDmaController dma = new GbaDmaController(memory);
+        memory.write32(0x02000000, 0x44332211);
+        memory.write32(0x02000004, 0x88776655);
+        memory.write32(0x02000008, 0xCCBBAA99);
+        memory.write32(0x0200000C, 0x00FFEEDD);
+        setupDma(memory, 1, 0x02000000, GbaAudio.FIFO_A, 0, (1 << 15) | (3 << 12) | (1 << 10));
+
+        dma.triggerAudioFifoTransfers(GbaAudio.FIFO_A_REQUEST);
+
+        assertEquals(16, memory.audio().fifoASize());
+        assertEquals(0x02000010, memory.read32(0x040000BC));
+        assertEquals(GbaAudio.FIFO_A, memory.read32(0x040000C0));
+        assertEquals(0x11, memory.audio().popFifoA());
+        assertEquals(0x22, memory.audio().popFifoA());
     }
 
     private static void setupDma(GbaMemory memory, int channel, int source, int destination, int count, int control) {

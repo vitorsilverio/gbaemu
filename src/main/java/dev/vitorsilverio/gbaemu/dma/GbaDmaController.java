@@ -1,19 +1,23 @@
 package dev.vitorsilverio.gbaemu.dma;
 
 import dev.vitorsilverio.armjitter.memory.AddressSpace;
+import dev.vitorsilverio.gbaemu.audio.GbaAudio;
 import dev.vitorsilverio.gbaemu.interrupt.GbaInterrupt;
 import dev.vitorsilverio.gbaemu.interrupt.GbaInterruptController;
 
 /// Controlador inicial de DMA do GBA.
 ///
-/// Implementa disparo imediato para DMA0-3. Os modos HBlank/VBlank/Special
-/// ficam preservados no registrador, mas ainda nao sao agendados pelo timing.
+/// Implementa disparos imediato, VBlank e HBlank para DMA0-3. O modo Special
+/// ainda fica preservado no registrador ate termos audio/cartucho mais completos.
 public final class GbaDmaController {
     private static final int DMA_BASE = 0x040000B0;
     private static final int DMA_STRIDE = 12;
     private static final int ENABLE = 1 << 15;
     private static final int START_TIMING_MASK = 0b11 << 12;
     private static final int START_IMMEDIATE = 0;
+    private static final int START_VBLANK = 1;
+    private static final int START_HBLANK = 2;
+    private static final int START_SPECIAL = 3;
     private static final int WORD_TRANSFER = 1 << 10;
     private static final int IRQ_ON_END = 1 << 14;
     private static final int REPEAT = 1 << 9;
@@ -33,8 +37,39 @@ public final class GbaDmaController {
     }
 
     public void triggerImmediateTransfers() {
+        triggerTransfers(START_IMMEDIATE);
+    }
+
+    public void triggerVblankTransfers() {
+        triggerTransfers(START_VBLANK);
+    }
+
+    public void triggerHblankTransfers() {
+        triggerTransfers(START_HBLANK);
+    }
+
+    public void triggerAudioFifoTransfers(int fifoRequestMask) {
+        if (fifoRequestMask == 0) {
+            return;
+        }
+        for (int channel = 1; channel <= 2; channel++) {
+            int base = channelBase(channel);
+            int control = memory.read16(base + 10);
+            if ((control & ENABLE) == 0 || startTiming(control) != START_SPECIAL) {
+                continue;
+            }
+            int destination = memory.read32(base + 4) & destinationMask(channel);
+            if ((destination & ~3) == GbaAudio.FIFO_A && (fifoRequestMask & GbaAudio.FIFO_A_REQUEST) != 0) {
+                runAudioFifo(channel);
+            } else if ((destination & ~3) == GbaAudio.FIFO_B && (fifoRequestMask & GbaAudio.FIFO_B_REQUEST) != 0) {
+                runAudioFifo(channel);
+            }
+        }
+    }
+
+    private void triggerTransfers(int startTiming) {
         for (int channel = 0; channel < 4; channel++) {
-            if (isImmediateEnabled(channel)) {
+            if (isEnabledForStartTiming(channel, startTiming)) {
                 run(channel);
             }
         }
@@ -80,7 +115,7 @@ public final class GbaDmaController {
             memory.write32(base + 4, currentDestination);
         }
 
-        if ((control & REPEAT) == 0 || immediateStart(control)) {
+        if ((control & REPEAT) == 0 || startTiming(control) == START_IMMEDIATE) {
             memory.write16(base + 10, control & ~ENABLE);
         }
         if (interrupts != null && (control & IRQ_ON_END) != 0) {
@@ -88,13 +123,32 @@ public final class GbaDmaController {
         }
     }
 
-    private boolean isImmediateEnabled(int channel) {
+    private boolean isEnabledForStartTiming(int channel, int startTiming) {
         int control = memory.read16(channelBase(channel) + 10);
-        return (control & ENABLE) != 0 && immediateStart(control);
+        return (control & ENABLE) != 0 && startTiming(control) == startTiming;
     }
 
-    private static boolean immediateStart(int control) {
-        return (control & START_TIMING_MASK) == START_IMMEDIATE;
+    private void runAudioFifo(int channel) {
+        int base = channelBase(channel);
+        int control = memory.read16(base + 10);
+        int source = memory.read32(base) & sourceMask(channel);
+        int destination = memory.read32(base + 4) & destinationMask(channel);
+        int sourceStep = addressStep((control >>> SOURCE_CONTROL_SHIFT) & 0x3, 4);
+
+        int currentSource = source;
+        for (int i = 0; i < 4; i++) {
+            memory.write32(destination, memory.read32(currentSource));
+            currentSource += sourceStep;
+        }
+        memory.write32(base, currentSource);
+
+        if (interrupts != null && (control & IRQ_ON_END) != 0) {
+            interrupts.request(GbaInterrupt.values()[GbaInterrupt.DMA0.ordinal() + channel]);
+        }
+    }
+
+    private static int startTiming(int control) {
+        return (control & START_TIMING_MASK) >>> 12;
     }
 
     private static int addressStep(int mode, int unitSize) {

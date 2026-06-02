@@ -28,11 +28,22 @@ public final class GbaVideo {
     private static final int BG3PD = 0x04000036;
     private static final int BG3X = 0x04000038;
     private static final int BG3Y = 0x0400003C;
+    private static final int WIN0H = 0x04000040;
+    private static final int WIN1H = 0x04000042;
+    private static final int WIN0V = 0x04000044;
+    private static final int WIN1V = 0x04000046;
+    private static final int WININ = 0x04000048;
+    private static final int WINOUT = 0x0400004A;
     private static final int FORCED_BLANK = 1 << 7;
     private static final int BG_ENABLE_SHIFT = 8;
     private static final int BG2_ENABLE = 1 << 10;
     private static final int OBJ_ENABLE = 1 << 12;
     private static final int OBJ_1D_MAPPING = 1 << 6;
+    private static final int WIN0_ENABLE = 1 << 13;
+    private static final int WIN1_ENABLE = 1 << 14;
+    private static final int OBJ_WINDOW_ENABLE = 1 << 15;
+    private static final int WINDOW_OBJ_ENABLE = 1 << 4;
+    private static final int WINDOW_ALL_LAYERS = 0x1F;
     private static final int VRAM = 0x06000000;
     private static final int OAM = 0x07000000;
     private static final int PALETTE = 0x05000000;
@@ -48,6 +59,7 @@ public final class GbaVideo {
 
     private final int[] framebuffer = new int[WIDTH * HEIGHT];
     private final int[] priorities = new int[WIDTH * HEIGHT];
+    private final byte[] windowMasks = new byte[WIDTH * HEIGHT];
 
     public int[] renderFrame(AddressSpace memory) {
         int dispcnt = memory.read16(DISPCNT);
@@ -59,19 +71,20 @@ public final class GbaVideo {
         }
         Arrays.fill(framebuffer, bgr555ToArgb(memory.read16(PALETTE)));
         Arrays.fill(priorities, 4);
+        byte[] layerMasks = activeWindowMasks(memory, dispcnt);
 
         switch (mode) {
-            case 0 -> renderTileBackgrounds(memory, dispcnt, 0b1111, 0);
-            case 1 -> renderTileBackgrounds(memory, dispcnt, 0b0011, 0b0100);
-            case 2 -> renderTileBackgrounds(memory, dispcnt, 0, 0b1100);
-            case 3 -> renderMode3(memory);
-            case 4 -> renderMode4(memory, (dispcnt & (1 << 4)) != 0);
-            case 5 -> renderMode5(memory, (dispcnt & (1 << 4)) != 0);
+            case 0 -> renderTileBackgrounds(memory, dispcnt, 0b1111, 0, layerMasks);
+            case 1 -> renderTileBackgrounds(memory, dispcnt, 0b0011, 0b0100, layerMasks);
+            case 2 -> renderTileBackgrounds(memory, dispcnt, 0, 0b1100, layerMasks);
+            case 3 -> renderMode3(memory, layerMasks);
+            case 4 -> renderMode4(memory, (dispcnt & (1 << 4)) != 0, layerMasks);
+            case 5 -> renderMode5(memory, (dispcnt & (1 << 4)) != 0, layerMasks);
             default -> {
             }
         }
         if ((dispcnt & OBJ_ENABLE) != 0) {
-            renderObjects(memory, dispcnt);
+            renderObjects(memory, dispcnt, layerMasks);
         }
 
         return framebufferSnapshot();
@@ -81,7 +94,12 @@ public final class GbaVideo {
         return Arrays.copyOf(framebuffer, framebuffer.length);
     }
 
-    private void renderTileBackgrounds(AddressSpace memory, int dispcnt, int regularMask, int affineMask) {
+    private void renderTileBackgrounds(
+            AddressSpace memory,
+            int dispcnt,
+            int regularMask,
+            int affineMask,
+            byte[] layerMasks) {
         for (int priority = 3; priority >= 0; priority--) {
             for (int bg = 3; bg >= 0; bg--) {
                 if ((dispcnt & (1 << (BG_ENABLE_SHIFT + bg))) == 0) {
@@ -92,21 +110,26 @@ public final class GbaVideo {
                     continue;
                 }
                 if ((regularMask & (1 << bg)) != 0) {
-                    renderRegularBackground(memory, bg, bgcnt);
+                    renderRegularBackground(memory, bg, bgcnt, layerMasks);
                 } else if ((affineMask & (1 << bg)) != 0) {
-                    renderAffineBackground(memory, bg, bgcnt);
+                    renderAffineBackground(memory, bg, bgcnt, layerMasks);
                 }
             }
         }
     }
 
-    private void renderRegularBackground(AddressSpace memory, int bg, int bgcnt) {
+    private void renderRegularBackground(AddressSpace memory, int bg, int bgcnt, byte[] layerMasks) {
         for (int y = 0; y < HEIGHT; y++) {
-            renderRegularBackgroundLine(memory, bg, bgcnt, y);
+            renderRegularBackgroundLine(memory, bg, bgcnt, y, layerMasks);
         }
     }
 
-    private void renderRegularBackgroundLine(AddressSpace memory, int bg, int bgcnt, int screenY) {
+    private void renderRegularBackgroundLine(
+            AddressSpace memory,
+            int bg,
+            int bgcnt,
+            int screenY,
+            byte[] layerMasks) {
         int charBase = VRAM + ((bgcnt >>> 2) & 0x3) * CHAR_BLOCK_SIZE;
         boolean eightBpp = (bgcnt & (1 << 7)) != 0;
         int screenBase = VRAM + ((bgcnt >>> 8) & 0x1F) * MAP_BLOCK_SIZE;
@@ -118,17 +141,20 @@ public final class GbaVideo {
         int sourceY = Math.floorMod(screenY + vofs, bgHeight);
 
         for (int screenX = 0; screenX < WIDTH; screenX++) {
+            int index = screenY * WIDTH + screenX;
+            if (!layerEnabled(layerMasks, index, bg)) {
+                continue;
+            }
             int sourceX = Math.floorMod(screenX + hofs, bgWidth);
             int color = regularBackgroundPixel(memory, charBase, screenBase, size, eightBpp, sourceX, sourceY);
             if (color != TRANSPARENT) {
-                int index = screenY * WIDTH + screenX;
                 framebuffer[index] = color;
                 priorities[index] = bgcnt & 0x3;
             }
         }
     }
 
-    private void renderAffineBackground(AddressSpace memory, int bg, int bgcnt) {
+    private void renderAffineBackground(AddressSpace memory, int bg, int bgcnt, byte[] layerMasks) {
         int charBase = VRAM + ((bgcnt >>> 2) & 0x3) * CHAR_BLOCK_SIZE;
         int screenBase = VRAM + ((bgcnt >>> 8) & 0x1F) * MAP_BLOCK_SIZE;
         boolean wrap = (bgcnt & (1 << 13)) != 0;
@@ -145,13 +171,15 @@ public final class GbaVideo {
             int sourceX = refX + pb * screenY;
             int sourceY = refY + pd * screenY;
             for (int screenX = 0; screenX < WIDTH; screenX++) {
+                int index = screenY * WIDTH + screenX;
                 int pixelX = sourceX >> 8;
                 int pixelY = sourceY >> 8;
-                int color = affineBackgroundPixel(memory, charBase, screenBase, size, wrap, pixelX, pixelY);
-                if (color != TRANSPARENT) {
-                    int index = screenY * WIDTH + screenX;
-                    framebuffer[index] = color;
-                    priorities[index] = bgcnt & 0x3;
+                if (layerEnabled(layerMasks, index, bg)) {
+                    int color = affineBackgroundPixel(memory, charBase, screenBase, size, wrap, pixelX, pixelY);
+                    if (color != TRANSPARENT) {
+                        framebuffer[index] = color;
+                        priorities[index] = bgcnt & 0x3;
+                    }
                 }
                 sourceX += pa;
                 sourceY += pc;
@@ -219,7 +247,7 @@ public final class GbaVideo {
         return bgr555ToArgb(memory.read16(PALETTE + paletteIndex * 2));
     }
 
-    private void renderMode3(AddressSpace memory) {
+    private void renderMode3(AddressSpace memory, byte[] layerMasks) {
         if ((memory.read16(DISPCNT) & BG2_ENABLE) == 0) {
             return;
         }
@@ -228,13 +256,16 @@ public final class GbaVideo {
             int source = VRAM + line * 2;
             for (int x = 0; x < WIDTH; x++) {
                 int index = line + x;
+                if (!layerEnabled(layerMasks, index, 2)) {
+                    continue;
+                }
                 framebuffer[index] = bgr555ToArgb(memory.read16(source + x * 2));
                 priorities[index] = 2;
             }
         }
     }
 
-    private void renderMode4(AddressSpace memory, boolean backBuffer) {
+    private void renderMode4(AddressSpace memory, boolean backBuffer, byte[] layerMasks) {
         if ((memory.read16(DISPCNT) & BG2_ENABLE) == 0) {
             return;
         }
@@ -243,9 +274,12 @@ public final class GbaVideo {
             int line = y * WIDTH;
             int source = base + line;
             for (int x = 0; x < WIDTH; x++) {
+                int index = line + x;
+                if (!layerEnabled(layerMasks, index, 2)) {
+                    continue;
+                }
                 int paletteIndex = memory.read8(source + x);
                 if (paletteIndex != 0) {
-                    int index = line + x;
                     framebuffer[index] = bgr555ToArgb(memory.read16(PALETTE + paletteIndex * 2));
                     priorities[index] = 2;
                 }
@@ -253,7 +287,7 @@ public final class GbaVideo {
         }
     }
 
-    private void renderMode5(AddressSpace memory, boolean backBuffer) {
+    private void renderMode5(AddressSpace memory, boolean backBuffer, byte[] layerMasks) {
         if ((memory.read16(DISPCNT) & BG2_ENABLE) == 0) {
             return;
         }
@@ -263,13 +297,16 @@ public final class GbaVideo {
             int source = base + y * MODE_5_WIDTH * 2;
             for (int x = 0; x < MODE_5_WIDTH; x++) {
                 int index = line + x;
+                if (!layerEnabled(layerMasks, index, 2)) {
+                    continue;
+                }
                 framebuffer[index] = bgr555ToArgb(memory.read16(source + x * 2));
                 priorities[index] = 2;
             }
         }
     }
 
-    private void renderObjects(AddressSpace memory, int dispcnt) {
+    private void renderObjects(AddressSpace memory, int dispcnt, byte[] layerMasks) {
         boolean oneDimensionalMapping = (dispcnt & OBJ_1D_MAPPING) != 0;
         for (int object = 127; object >= 0; object--) {
             int base = OAM + object * 8;
@@ -277,22 +314,41 @@ public final class GbaVideo {
             int attr1 = memory.read16(base + 2);
             int attr2 = memory.read16(base + 4);
             boolean affine = (attr0 & (1 << 8)) != 0;
+            boolean doubleSize = affine && (attr0 & (1 << 9)) != 0;
             boolean disabled = !affine && (attr0 & (1 << 9)) != 0;
             int objectMode = (attr0 >>> 10) & 0x3;
-            if (disabled || affine || objectMode == 2) {
+            if (disabled || objectMode == 2) {
                 continue;
             }
 
             int[] dimensions = objectDimensions((attr0 >>> 14) & 0x3, (attr1 >>> 14) & 0x3);
+            int width = dimensions[0];
             int height = dimensions[1];
+            int renderWidth = doubleSize ? width * 2 : width;
+            int renderHeight = doubleSize ? height * 2 : height;
             int y = attr0 & 0xFF;
             if (y >= 160) {
                 y -= 256;
             }
-            if (y >= HEIGHT || y + height <= 0) {
+            if (y >= HEIGHT || y + renderHeight <= 0) {
                 continue;
             }
-            renderObject(memory, oneDimensionalMapping, attr0, attr1, attr2, y, dimensions[0], height);
+            if (affine) {
+                renderAffineObject(
+                        memory,
+                        oneDimensionalMapping,
+                        attr0,
+                        attr1,
+                        attr2,
+                        y,
+                        width,
+                        height,
+                        renderWidth,
+                        renderHeight,
+                        layerMasks);
+            } else {
+                renderObject(memory, oneDimensionalMapping, attr0, attr1, attr2, y, width, height, layerMasks);
+            }
         }
     }
 
@@ -304,7 +360,8 @@ public final class GbaVideo {
             int attr2,
             int y,
             int width,
-            int height) {
+            int height,
+            byte[] layerMasks) {
         int x = attr1 & 0x1FF;
         if (x >= 256) {
             x -= 512;
@@ -331,18 +388,154 @@ public final class GbaVideo {
                 if (screenX < 0 || screenX >= WIDTH) {
                     continue;
                 }
+                int index = screenY * WIDTH + screenX;
+                if (!objectLayerEnabled(layerMasks, index)) {
+                    continue;
+                }
                 int tileX = horizontalFlip ? width - 1 - px : px;
                 int color = objectPixel(memory, oneDimensionalMapping, eightBpp, tileNumber, paletteBank, width, tileX, tileY);
                 if (color == TRANSPARENT) {
                     continue;
                 }
-                int index = screenY * WIDTH + screenX;
                 if (priority <= priorities[index]) {
                     framebuffer[index] = color;
                     priorities[index] = priority;
                 }
             }
         }
+    }
+
+    private void renderAffineObject(
+            AddressSpace memory,
+            boolean oneDimensionalMapping,
+            int attr0,
+            int attr1,
+            int attr2,
+            int y,
+            int textureWidth,
+            int textureHeight,
+            int renderWidth,
+            int renderHeight,
+            byte[] layerMasks) {
+        int x = attr1 & 0x1FF;
+        if (x >= 256) {
+            x -= 512;
+        }
+        if (x >= WIDTH || x + renderWidth <= 0) {
+            return;
+        }
+
+        int matrix = (attr1 >>> 9) & 0x1F;
+        int base = OAM + matrix * 32;
+        int pa = signed16(memory.read16(base + 6));
+        int pb = signed16(memory.read16(base + 14));
+        int pc = signed16(memory.read16(base + 22));
+        int pd = signed16(memory.read16(base + 30));
+        boolean eightBpp = (attr0 & (1 << 13)) != 0;
+        int tileNumber = attr2 & 0x3FF;
+        int priority = (attr2 >>> 10) & 0x3;
+        int paletteBank = (attr2 >>> 12) & 0xF;
+        int renderCenterX = renderWidth / 2;
+        int renderCenterY = renderHeight / 2;
+        int textureCenterX = textureWidth / 2;
+        int textureCenterY = textureHeight / 2;
+
+        for (int py = 0; py < renderHeight; py++) {
+            int screenY = y + py;
+            if (screenY < 0 || screenY >= HEIGHT) {
+                continue;
+            }
+            int dy = py - renderCenterY;
+            for (int px = 0; px < renderWidth; px++) {
+                int screenX = x + px;
+                if (screenX < 0 || screenX >= WIDTH) {
+                    continue;
+                }
+                int index = screenY * WIDTH + screenX;
+                if (!objectLayerEnabled(layerMasks, index)) {
+                    continue;
+                }
+
+                int dx = px - renderCenterX;
+                int textureX = ((pa * dx + pb * dy) >> 8) + textureCenterX;
+                int textureY = ((pc * dx + pd * dy) >> 8) + textureCenterY;
+                if (textureX < 0 || textureX >= textureWidth || textureY < 0 || textureY >= textureHeight) {
+                    continue;
+                }
+
+                int color = objectPixel(
+                        memory,
+                        oneDimensionalMapping,
+                        eightBpp,
+                        tileNumber,
+                        paletteBank,
+                        textureWidth,
+                        textureX,
+                        textureY);
+                if (color == TRANSPARENT) {
+                    continue;
+                }
+                if (priority <= priorities[index]) {
+                    framebuffer[index] = color;
+                    priorities[index] = priority;
+                }
+            }
+        }
+    }
+
+    private byte[] activeWindowMasks(AddressSpace memory, int dispcnt) {
+        int activeWindows = dispcnt & (WIN0_ENABLE | WIN1_ENABLE | OBJ_WINDOW_ENABLE);
+        if (activeWindows == 0) {
+            return null;
+        }
+
+        int winIn = memory.read16(WININ);
+        int winOut = memory.read16(WINOUT);
+        int outsideMask = winOut & WINDOW_ALL_LAYERS;
+        int win0Mask = winIn & WINDOW_ALL_LAYERS;
+        int win1Mask = (winIn >>> 8) & WINDOW_ALL_LAYERS;
+        int win0H = memory.read16(WIN0H);
+        int win1H = memory.read16(WIN1H);
+        int win0V = memory.read16(WIN0V);
+        int win1V = memory.read16(WIN1V);
+
+        for (int y = 0; y < HEIGHT; y++) {
+            for (int x = 0; x < WIDTH; x++) {
+                int mask = outsideMask;
+                if ((dispcnt & WIN0_ENABLE) != 0 && inWindow(x, y, win0H, win0V)) {
+                    mask = win0Mask;
+                } else if ((dispcnt & WIN1_ENABLE) != 0 && inWindow(x, y, win1H, win1V)) {
+                    mask = win1Mask;
+                }
+                windowMasks[y * WIDTH + x] = (byte) mask;
+            }
+        }
+        return windowMasks;
+    }
+
+    private static boolean inWindow(int x, int y, int horizontal, int vertical) {
+        int left = (horizontal >>> 8) & 0xFF;
+        int right = horizontal & 0xFF;
+        int top = (vertical >>> 8) & 0xFF;
+        int bottom = vertical & 0xFF;
+        return inRangeWrapped(x, left, right, WIDTH) && inRangeWrapped(y, top, bottom, HEIGHT);
+    }
+
+    private static boolean inRangeWrapped(int value, int start, int end, int limit) {
+        start = Math.min(start, limit);
+        end = Math.min(end, limit);
+        if (start <= end) {
+            return value >= start && value < end;
+        }
+        return value >= start || value < end;
+    }
+
+    private static boolean layerEnabled(byte[] layerMasks, int index, int layer) {
+        return layerMasks == null || (layerMasks[index] & (1 << layer)) != 0;
+    }
+
+    private static boolean objectLayerEnabled(byte[] layerMasks, int index) {
+        return layerMasks == null || (layerMasks[index] & WINDOW_OBJ_ENABLE) != 0;
     }
 
     private static int objectPixel(
@@ -363,12 +556,16 @@ public final class GbaVideo {
         int localX = pixelX & 7;
         int localY = pixelY & 7;
         int paletteIndex = eightBpp
-                ? readTile8Bpp(memory, OBJ_TILES, tile, localX, localY)
+                ? readObjectTile8Bpp(memory, tile, localX, localY)
                 : readTile4Bpp(memory, OBJ_TILES, tile, paletteBank, localX, localY);
         if (paletteIndex == 0) {
             return TRANSPARENT;
         }
         return bgr555ToArgb(memory.read16(OBJ_PALETTE + paletteIndex * 2));
+    }
+
+    private static int signed16(int value) {
+        return (short) (value & 0xFFFF);
     }
 
     public static int bgr555ToArgb(int value) {
@@ -399,6 +596,10 @@ public final class GbaVideo {
 
     private static int readTile8Bpp(AddressSpace memory, int charBase, int tileNumber, int pixelX, int pixelY) {
         return memory.read8(charBase + tileNumber * 64 + pixelY * 8 + pixelX);
+    }
+
+    private static int readObjectTile8Bpp(AddressSpace memory, int tileNumber, int pixelX, int pixelY) {
+        return memory.read8(OBJ_TILES + tileNumber * 32 + pixelY * 8 + pixelX);
     }
 
     private static int regularBackgroundWidth(int size) {
@@ -448,10 +649,6 @@ public final class GbaVideo {
             };
             default -> new int[]{0, 0};
         };
-    }
-
-    private static int signed16(int value) {
-        return (short) value;
     }
 
     private static int signed28(int value) {

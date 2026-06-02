@@ -29,6 +29,29 @@ public final class GbaLcdTiming {
     private boolean hblank;
     private boolean vcountMatch;
 
+    public record Events(int vblankStartedCount, int hblankStartedCount, int vcountMatchedCount) {
+        static final Events NONE = new Events(0, 0, 0);
+
+        public boolean vblankStarted() {
+            return vblankStartedCount > 0;
+        }
+
+        public boolean hblankStarted() {
+            return hblankStartedCount > 0;
+        }
+
+        public boolean vcountMatched() {
+            return vcountMatchedCount > 0;
+        }
+
+        private Events plus(Events other) {
+            return new Events(
+                    vblankStartedCount + other.vblankStartedCount,
+                    hblankStartedCount + other.hblankStartedCount,
+                    vcountMatchedCount + other.vcountMatchedCount);
+        }
+    }
+
     public GbaLcdTiming(AddressSpace memory) {
         this(memory, null);
     }
@@ -47,23 +70,44 @@ public final class GbaLcdTiming {
         return scanlineCycles;
     }
 
-    public void tick(int cycles) {
+    public Events tick(int cycles) {
         if (cycles < 0) {
             throw new IllegalArgumentException("cycles must be >= 0");
         }
+        if (cycles == 0) {
+            return Events.NONE;
+        }
 
-        scanlineCycles += cycles;
-        while (scanlineCycles >= CYCLES_PER_SCANLINE) {
-            scanlineCycles -= CYCLES_PER_SCANLINE;
-            scanline++;
-            if (scanline == TOTAL_SCANLINES) {
-                scanline = 0;
+        Events events = Events.NONE;
+        int remaining = cycles;
+        while (remaining > 0) {
+            int untilScanlineEnd = CYCLES_PER_SCANLINE - scanlineCycles;
+            int untilNextEvent = untilScanlineEnd;
+            if (scanlineCycles < HBLANK_START_CYCLE) {
+                untilNextEvent = Math.min(untilNextEvent, HBLANK_START_CYCLE - scanlineCycles);
+            }
+
+            int step = Math.min(remaining, untilNextEvent);
+            scanlineCycles += step;
+            remaining -= step;
+
+            if (step == untilNextEvent) {
+                events = events.plus(updateRegisters());
+                if (scanlineCycles == CYCLES_PER_SCANLINE) {
+                    scanlineCycles = 0;
+                    scanline++;
+                    if (scanline == TOTAL_SCANLINES) {
+                        scanline = 0;
+                    }
+                    events = events.plus(updateRegisters());
+                }
             }
         }
-        updateRegisters();
+        events = events.plus(updateRegisters());
+        return events;
     }
 
-    private void updateRegisters() {
+    private Events updateRegisters() {
         int dispstat = memory.read16(DISPSTAT) & 0xFFF8;
         boolean nextVblank = scanline >= VISIBLE_SCANLINES;
         boolean nextHblank = scanlineCycles >= HBLANK_START_CYCLE;
@@ -79,31 +123,36 @@ public final class GbaLcdTiming {
             dispstat |= VCOUNT_FLAG;
         }
 
-        requestInterruptsOnRisingEdges(dispstat, nextVblank, nextHblank, nextVcountMatch);
+        Events events = eventsOnRisingEdges(dispstat, nextVblank, nextHblank, nextVcountMatch);
         vblank = nextVblank;
         hblank = nextHblank;
         vcountMatch = nextVcountMatch;
 
         memory.write16(DISPSTAT, dispstat);
         memory.write16(VCOUNT, scanline);
+        return events;
     }
 
-    private void requestInterruptsOnRisingEdges(
+    private Events eventsOnRisingEdges(
             int dispstat,
             boolean nextVblank,
             boolean nextHblank,
             boolean nextVcountMatch) {
+        boolean vblankStarted = !vblank && nextVblank;
+        boolean hblankStarted = !hblank && nextHblank;
+        boolean vcountMatched = !vcountMatch && nextVcountMatch;
         if (interrupts == null) {
-            return;
+            return new Events(vblankStarted ? 1 : 0, hblankStarted ? 1 : 0, vcountMatched ? 1 : 0);
         }
-        if (!vblank && nextVblank && (dispstat & (1 << 3)) != 0) {
+        if (vblankStarted && (dispstat & (1 << 3)) != 0) {
             interrupts.request(GbaInterrupt.VBLANK);
         }
-        if (!hblank && nextHblank && (dispstat & (1 << 4)) != 0) {
+        if (hblankStarted && (dispstat & (1 << 4)) != 0) {
             interrupts.request(GbaInterrupt.HBLANK);
         }
-        if (!vcountMatch && nextVcountMatch && (dispstat & (1 << 5)) != 0) {
+        if (vcountMatched && (dispstat & (1 << 5)) != 0) {
             interrupts.request(GbaInterrupt.VCOUNT);
         }
+        return new Events(vblankStarted ? 1 : 0, hblankStarted ? 1 : 0, vcountMatched ? 1 : 0);
     }
 }

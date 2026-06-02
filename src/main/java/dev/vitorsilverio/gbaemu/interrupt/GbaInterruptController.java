@@ -1,6 +1,6 @@
 package dev.vitorsilverio.gbaemu.interrupt;
 
-import dev.vitorsilverio.armjitter.memory.AddressSpace;
+import dev.vitorsilverio.gbaemu.memory.GbaMemory;
 
 /// Controlador inicial dos registradores IE/IF/IME.
 public final class GbaInterruptController {
@@ -8,9 +8,9 @@ public final class GbaInterruptController {
     public static final int IF = 0x04000202;
     public static final int IME = 0x04000208;
 
-    private final AddressSpace memory;
+    private final GbaMemory memory;
 
-    public GbaInterruptController(AddressSpace memory) {
+    public GbaInterruptController(GbaMemory memory) {
         this.memory = memory;
     }
 
@@ -31,9 +31,7 @@ public final class GbaInterruptController {
     }
 
     public void request(int mask) {
-        int next = memory.read16(IF) | (mask & 0x3FFF);
-        memory.write8(IF, next);
-        memory.write8(IF + 1, next >>> 8);
+        memory.requestInterruptFlags(mask);
     }
 
     public void acknowledge(int mask) {

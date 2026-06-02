@@ -16,21 +16,31 @@ Para o GBA, o GBATEK cumpre o mesmo papel que o Pan Docs teve no projeto de Game
 - Projeto Maven Java 25.
 - Dependencia local em `dev.vitorsilverio:arm-jitter:1.0`.
 - Barramento `GbaMemory` implementando `AddressSpace` do `arm-jitter`.
-- Boot por ROM direto ou por BIOS+ROM, com PC inicial em `00000000` no caminho com BIOS.
+- Boot por ROM direto ou por BIOS+ROM. Na CLI, `--bios` carrega a BIOS mas usa boot HLE por padrao; `--real-bios` força o PC inicial em `00000000` para depurar a BIOS real.
+- Skip BIOS explicito em `GbaConsole.fromRom(...)`, com PC em `08000000`, stack inicial e `POSTFLG`.
 - Renderer inicial `GbaVideo` com framebuffer ARGB de 240x160.
-- DMA imediato inicial para DMA0-3, cobrindo halfword/word, incremento/decremento/fixo/reload e mascaras de endereco.
+- DMA inicial para DMA0-3, cobrindo disparos imediato/VBlank/HBlank, halfword/word, incremento/decremento/fixo/reload e mascaras de endereco.
 - Interrupcoes iniciais com IE/IF/IME, write-one-to-clear em IF, linha externa da CPU e pedidos de LCD/DMA.
 - Timers TM0-3 com reload, prescaler, cascata e IRQ-on-overflow.
 - Keypad com `KEYINPUT` active-low, `KEYCNT` OR/AND e IRQ de keypad.
+- Audio inicial com registradores `SOUND1-4`, `SOUNDCNT_L/H/X`, `SOUNDBIAS` e FIFOs A/B mapeados em I/O.
+- Waitstates iniciais ligados a API `AddressSpace.accessCycles` do `arm-jitter`, alimentando `core.cycles()` para sincronizar CPU/LCD/timers.
 - Cartucho com parsing do header GBA, titulo, game code, maker code, fixed value e complement check.
+- Deteccao de save type por assinatura na ROM: SRAM, FLASH, FLASH512, FLASH1M e EEPROM.
+- Save memory inicial com backing SRAM-like, snapshot/load e ligacao na regiao `0E000000`.
+- Controle simples de sistema com `POSTFLG`, `HALTCNT` e `WAITCNT`.
+- BIOS HLE via callbacks de SWI para skip BIOS/ROM: cobre `SoftReset` ate `SoundGetJumpList` (`0x00..0x2A`), com implementacoes para reset, math, copia, affine, unpack/decompress, filtros Diff e stubs seguros para audio/multiboot enquanto a APU completa evolui.
+- Diagnostico de video com estatisticas de `DISPCNT`, modo, cores, pixels nao-backdrop, Palette/VRAM nao-zero e OBJ visiveis.
+- Trace publico da CPU do `arm-jitter` integrado ao CLI para capturar janelas iniciais/finais de PC, ARM/THUMB, instrucao, SP/LR/CPSR e ciclos durante o boot.
 - PPU implementada ate agora:
   - Modos bitmap 3, 4 e 5 com page select nos modos 4/5.
   - Backgrounds regulares/text BG em modo 0 e BG0/BG1 em modo 1.
   - Scroll `BGxHOFS/BGxVOFS`, tilemaps 4bpp/8bpp, screen sizes 256/512, flip H/V e prioridade basica.
   - Backgrounds affine BG2/BG3 em modos 1/2 com matriz, referencia, wrap e prioridade.
   - OBJ/sprites regulares 4bpp/8bpp, shape/size, flip H/V, prioridade contra BG e mapeamento 1D/2D.
-  - Timing inicial de LCD com `VCOUNT`, flags de `DISPSTAT`, VBlank e HBlank.
-  - Ainda faltam affine OBJ, mosaic, windows, alpha blending/brightness e timing com IRQ por scanline.
+  - OBJ affine inicial com matrizes de OAM e double-size.
+  - Timing inicial de LCD com `VCOUNT`, flags de `DISPSTAT`, VBlank/HBlank e eventos para DMA.
+  - Ainda faltam mosaic, windows, alpha blending/brightness e timing com IRQ por scanline.
 - Mapa inicial de memoria conforme GBATEK:
   - BIOS `00000000-00003FFF`
   - EWRAM `02000000-0203FFFF`, espelhada na janela `02000000-02FFFFFF`
@@ -59,6 +69,38 @@ mvn exec:java -Dexec.mainClass=dev.vitorsilverio.gbaemu.Main -Dexec.args="--bios
 
 O frame gerado usa o formato PPM binario (`P6`), simples de abrir ou converter em ferramentas de imagem.
 
+Gerar uma sequencia de frames sem trace, avancando a CPU entre capturas:
+
+```bash
+mvn exec:java -Dexec.mainClass=dev.vitorsilverio.gbaemu.Main -Dexec.args="--bios gba_bios.bin --rom game.gba --steps 1800000 --frame bios.ppm --frame-count 8 --frame-step-cycles 280896 --debug-video"
+```
+
+Abrir uma janela Swing com escala inteira:
+
+```bash
+mvn exec:java -Dexec.mainClass=dev.vitorsilverio.gbaemu.Main -Dexec.args="--bios gba_bios.bin --rom game.gba --window --scale 3 --no-frame"
+```
+
+Por padrao a janela avanca um frame de LCD por tick (`280896` ciclos). Para desacelerar/acelerar
+o bring-up visual, ajuste `--cycles-per-frame N`. `--steps-per-frame N` ainda existe como modo
+manual de debug e, quando informado, tem prioridade sobre o avanco por ciclos.
+
+Para investigar tela preta durante o bring-up da CPU/BIOS real, adicione `--real-bios --debug-video`.
+Isso imprime periodicamente um resumo como `mode`, `DISPCNT`, camadas habilitadas, quantidade de cores renderizadas,
+pixels diferentes do backdrop, Palette/VRAM nao-zero e OBJ visiveis:
+
+```bash
+mvn exec:java -Dexec.mainClass=dev.vitorsilverio.gbaemu.Main -Dexec.args="--bios gba_bios.bin --rom game.gba --window --scale 3 --no-frame --debug-video"
+```
+
+Para investigar loops de CPU no boot da BIOS, use `--trace-cpu N` para imprimir o inicio e
+`--trace-cpu-tail N` para guardar e imprimir apenas as ultimas instrucoes ao fim do run.
+O trace inclui PC, ARM/THUMB, opcode, tipo da instrucao, proximo PC, `r0-r12`, SP, LR, CPSR e ciclos:
+
+```bash
+mvn exec:java -Dexec.mainClass=dev.vitorsilverio.gbaemu.Main -Dexec.args="--bios gba_bios.bin --rom game.gba --steps 600 --no-frame --trace-cpu 40 --trace-cpu-tail 80"
+```
+
 Criar uma instancia programatica:
 
 ```java
@@ -69,7 +111,7 @@ console.stepCpu(1);
 int[] argb = console.renderFrame();
 ```
 
-Tambem existe `GbaConsole.fromRom(rom)` para o caminho futuro de skip BIOS, iniciando em `08000000`.
+Tambem existe `GbaConsole.fromRom(rom)` para skip BIOS, iniciando em `08000000` com estado inicial pos-BIOS.
 
 ## Regras de desenvolvimento
 
@@ -83,7 +125,7 @@ Tambem existe `GbaConsole.fromRom(rom)` para o caminho futuro de skip BIOS, inic
 ## Proximos passos sugeridos
 
 1. Rodar a BIOS real ate a primeira instrucao/acesso nao suportado e registrar o ponto de parada.
-2. Implementar registradores basicos de I/O alem de `DISPCNT`, principalmente `VCOUNT`, `DISPSTAT` e interrupcoes.
-3. Agendar DMA em HBlank/VBlank/Special e integrar IRQs.
-4. Expandir a PPU para affine OBJ, windows e blending.
+2. Corrigir o proximo ponto de BIOS real apos o display ligar: fluxo de IRQ/retorno para continuar a animacao do boot.
+3. Agendar DMA Special para audio/cartucho e conectar os FIFOs de audio aos timers.
+4. Expandir a PPU para windows, mosaic e blending.
 5. Depois que a BIOS completar, criar skip BIOS com estado inicial equivalente.

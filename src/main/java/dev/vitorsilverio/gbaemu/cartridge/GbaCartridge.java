@@ -6,15 +6,17 @@ import java.util.Arrays;
 public final class GbaCartridge {
     private final byte[] rom;
     private final GbaCartridgeHeader header;
+    private final GbaSaveType saveType;
 
-    private GbaCartridge(byte[] rom, GbaCartridgeHeader header) {
+    private GbaCartridge(byte[] rom, GbaCartridgeHeader header, GbaSaveType saveType) {
         this.rom = rom;
         this.header = header;
+        this.saveType = saveType;
     }
 
     public static GbaCartridge load(byte[] rom) {
         byte[] copy = Arrays.copyOf(rom, rom.length);
-        return new GbaCartridge(copy, GbaCartridgeHeader.parse(copy));
+        return new GbaCartridge(copy, GbaCartridgeHeader.parse(copy), GbaSaveTypeDetector.detect(copy));
     }
 
     public byte[] rom() {
@@ -23,5 +25,9 @@ public final class GbaCartridge {
 
     public GbaCartridgeHeader header() {
         return header;
+    }
+
+    public GbaSaveType saveType() {
+        return saveType;
     }
 }

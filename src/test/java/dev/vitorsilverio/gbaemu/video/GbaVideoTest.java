@@ -202,6 +202,57 @@ class GbaVideoTest {
     }
 
     @Test
+    void windowOneMasksBackgroundLayersPerPixel() {
+        GbaMemory memory = GbaMemory.withoutBios(new byte[0]);
+        GbaVideo video = new GbaVideo();
+
+        memory.write16(0x04000000, (1 << 14) | (1 << 8));
+        memory.write16(0x04000008, 1 << 8);
+        memory.write16(0x04000042, (8 << 8) | 16);
+        memory.write16(0x04000046, (0 << 8) | 8);
+        memory.write16(0x04000048, 1 << 8);
+        memory.write16(0x0400004A, 0);
+        memory.write16(0x05000000, 0);
+        memory.write16(0x05000002, 0x001F);
+        memory.write16(0x06000000, 0x1111);
+        memory.write16(0x06000002, 0x1111);
+        memory.write16(0x06000004, 0x1111);
+        memory.write16(0x06000006, 0x1111);
+        memory.write16(0x06000000 + 0x800, 0);
+
+        int[] frame = video.renderFrame(memory);
+
+        assertEquals(0xFF000000, frame[0]);
+        assertEquals(0xFFFF0000, frame[8]);
+    }
+
+    @Test
+    void windowOneCanMaskObjectsOutsideWindow() {
+        GbaMemory memory = GbaMemory.withoutBios(new byte[0]);
+        GbaVideo video = new GbaVideo();
+
+        disableObjects(memory);
+        memory.write16(0x04000000, (1 << 14) | (1 << 12));
+        memory.write16(0x04000042, (8 << 8) | 16);
+        memory.write16(0x04000046, (0 << 8) | 8);
+        memory.write16(0x04000048, (1 << 12));
+        memory.write16(0x0400004A, 0);
+        memory.write16(0x05000202, 0x001F);
+        memory.write16(0x06010000, 0x1111);
+        memory.write16(0x06010002, 0x1111);
+        memory.write16(0x06010004, 0x1111);
+        memory.write16(0x06010006, 0x1111);
+        memory.write16(0x07000000, 0);
+        memory.write16(0x07000002, 8);
+        memory.write16(0x07000004, 0);
+
+        int[] frame = video.renderFrame(memory);
+
+        assertEquals(0xFF000000, frame[0]);
+        assertEquals(0xFFFF0000, frame[8]);
+    }
+
+    @Test
     void objectHorizontalFlipIsHonored() {
         GbaMemory memory = GbaMemory.withoutBios(new byte[0]);
         GbaVideo video = new GbaVideo();
@@ -218,6 +269,24 @@ class GbaVideoTest {
 
         assertEquals(0xFF000000, frame[0]);
         assertEquals(0xFFFF0000, frame[7]);
+    }
+
+    @Test
+    void eightBppObjectTileNumberUsesThirtyTwoByteUnits() {
+        GbaMemory memory = GbaMemory.withoutBios(new byte[0]);
+        GbaVideo video = new GbaVideo();
+
+        disableObjects(memory);
+        memory.write16(0x04000000, 1 << 12);
+        memory.write16(0x05000202, 0x001F);
+        memory.write16(0x06010020, 0x0101);
+        memory.write16(0x07000000, 1 << 13);
+        memory.write16(0x07000002, 0);
+        memory.write16(0x07000004, 1);
+
+        int[] frame = video.renderFrame(memory);
+
+        assertEquals(0xFFFF0000, frame[0]);
     }
 
     @Test
