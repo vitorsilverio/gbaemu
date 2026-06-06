@@ -1,5 +1,7 @@
 package dev.vitorsilverio.gbaemu.audio;
 
+import dev.vitorsilverio.gbaemu.core.MemorySpace;
+
 import java.util.ArrayDeque;
 import java.util.Deque;
 
@@ -7,7 +9,7 @@ import java.util.Deque;
 ///
 /// Ainda nao mistura samples, mas modela a superficie de I/O usada pela BIOS e
 /// pelos jogos: registradores legiveis/escreviveis, SOUNDBIAS e FIFOs A/B.
-public final class GbaAudio {
+public final class GbaAudio implements MemorySpace {
     public static final int SOUND_START = 0x04000060;
     public static final int SOUND_END = 0x040000A7;
     public static final int SOUND1CNT_L = 0x04000060;
@@ -30,9 +32,9 @@ public final class GbaAudio {
     public static final int FIFO_A_REQUEST = 1;
     public static final int FIFO_B_REQUEST = 1 << 1;
 
+    private static final int REGISTERS_SIZE = SOUND_END - SOUND_START + 1;
     private static final int CPU_CLOCK_HZ = 16_777_216;
     private static final int OUTPUT_SAMPLE_RATE = 32_768;
-    private static final int IO_BASE = 0x04000000;
     private static final int FIFO_CAPACITY = 32;
     private static final int FIFO_REFILL_LEVEL = 16;
     private static final int PCM_CAPACITY = OUTPUT_SAMPLE_RATE;
@@ -51,7 +53,7 @@ public final class GbaAudio {
             {0, 1, 1, 1, 1, 1, 1, 0}
     };
 
-    private final byte[] io;
+    private final byte[] registers = new byte[REGISTERS_SIZE];
     private final Deque<Integer> fifoA = new ArrayDeque<>(FIFO_CAPACITY);
     private final Deque<Integer> fifoB = new ArrayDeque<>(FIFO_CAPACITY);
     private final Deque<Byte> pcm = new ArrayDeque<>(PCM_CAPACITY);
@@ -65,13 +67,33 @@ public final class GbaAudio {
     private long frameSequencerAccumulator;
     private int frameSequencerStep;
 
-    public GbaAudio(byte[] io) {
-        this.io = io;
+    public GbaAudio() {
         writeRaw16(SOUNDBIAS, 0x0200);
     }
 
-    public boolean handles(int address) {
+    @Override
+    public boolean contains(int address) {
         return address >= SOUND_START && address <= SOUND_END;
+    }
+
+    @Override
+    public int readByte(int address) {
+        return read8(address);
+    }
+
+    @Override
+    public void writeByte(int address, int value) {
+        write8(address, value & 0xFF);
+    }
+
+    @Override
+    public void writeHalfWord(int address, int value) {
+        write16(address & ~1, value & 0xFFFF);
+    }
+
+    @Override
+    public void writeWord(int address, int value) {
+        write32(address & ~3, value);
     }
 
     public int read8(int address) {
@@ -81,7 +103,7 @@ public final class GbaAudio {
         if ((address & ~1) == SOUNDCNT_X) {
             return readSoundControlXByte(address);
         }
-        return io[offset(address)] & 0xFF;
+        return registers[offset(address)] & 0xFF;
     }
 
     public void write8(int address, int value) {
@@ -250,7 +272,7 @@ public final class GbaAudio {
     private void clearSoundRegisters() {
         for (int address = SOUND_START; address <= SOUND_END; address++) {
             if (!isFifo(address)) {
-                io[offset(address)] = 0;
+                registers[offset(address)] = 0;
             }
         }
         fifoA.clear();
@@ -446,18 +468,18 @@ public final class GbaAudio {
     }
 
     private int readRaw16(int address) {
-        int low = io[offset(address)] & 0xFF;
-        int high = io[offset(address + 1)] & 0xFF;
+        int low = registers[offset(address)] & 0xFF;
+        int high = registers[offset(address + 1)] & 0xFF;
         return low | (high << 8);
     }
 
     private void writeRaw16(int address, int value) {
-        io[offset(address)] = (byte) value;
-        io[offset(address + 1)] = (byte) (value >>> 8);
+        registers[offset(address)] = (byte) value;
+        registers[offset(address + 1)] = (byte) (value >>> 8);
     }
 
     private static int offset(int address) {
-        return address - IO_BASE;
+        return address - SOUND_START;
     }
 
     private abstract static class SoundChannel {

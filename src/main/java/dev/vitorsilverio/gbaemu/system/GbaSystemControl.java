@@ -1,43 +1,60 @@
 package dev.vitorsilverio.gbaemu.system;
 
-import dev.vitorsilverio.armjitter.memory.AddressSpace;
+import dev.vitorsilverio.gbaemu.core.MemorySpace;
 
-/// Registradores simples de controle do sistema GBA.
-public final class GbaSystemControl {
+/// Registradores de controle do sistema GBA (POSTFLG, HALTCNT, WAITCNT).
+public final class GbaSystemControl implements MemorySpace {
     public static final int POSTFLG = 0x04000300;
     public static final int HALTCNT = 0x04000301;
     public static final int WAITCNT = 0x04000204;
 
-    private static final int POSTFLG_MASK = 1;
-    private static final int HALT_MODE_BIT = 1 << 7;
-
-    private final AddressSpace memory;
+    private int postflg;
+    private int waitcnt;
     private boolean halted;
     private boolean stopped;
 
-    public GbaSystemControl(AddressSpace memory) {
-        this.memory = memory;
+    @Override
+    public boolean contains(int address) {
+        return (address & ~1) == WAITCNT
+                || address == POSTFLG
+                || address == HALTCNT;
+    }
+
+    @Override
+    public int readByte(int address) {
+        if (address == POSTFLG) return postflg & 1;
+        if (address == HALTCNT) return 0;
+        if (address == WAITCNT)     return waitcnt & 0xFF;
+        if (address == WAITCNT + 1) return (waitcnt >>> 8) & 0xFF;
+        return 0;
+    }
+
+    @Override
+    public void writeByte(int address, int value) {
+        if (address == POSTFLG) { postflg = value & 1; return; }
+        if (address == HALTCNT) { writeHaltControl(value); return; }
+        if (address == WAITCNT)     { waitcnt = (waitcnt & 0xFF00) | (value & 0xFF); return; }
+        if (address == WAITCNT + 1) { waitcnt = (waitcnt & 0x00FF) | ((value & 0xFF) << 8); }
     }
 
     public boolean postBootFlag() {
-        return (memory.read8(POSTFLG) & POSTFLG_MASK) != 0;
+        return (postflg & 1) != 0;
     }
 
     public void setPostBootFlag(boolean value) {
-        memory.write8(POSTFLG, value ? POSTFLG_MASK : 0);
+        postflg = value ? 1 : 0;
     }
 
     public int waitControl() {
-        return memory.read16(WAITCNT);
+        return waitcnt;
     }
 
     public void setWaitControl(int value) {
-        memory.write16(WAITCNT, value);
+        waitcnt = value & 0xFFFF;
     }
 
     public void writeHaltControl(int value) {
-        memory.write8(HALTCNT, value);
-        if ((value & HALT_MODE_BIT) == 0) {
+        if ((value & 0x80) == 0) {
             halted = true;
             stopped = false;
         } else {

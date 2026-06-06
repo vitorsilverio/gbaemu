@@ -6,7 +6,7 @@ import dev.vitorsilverio.armjitter.decoder.DecodedInstruction;
 import dev.vitorsilverio.armjitter.decoder.InstructionKind;
 import dev.vitorsilverio.armjitter.decoder.InstructionSet;
 import dev.vitorsilverio.armjitter.swi.SwiDispatcher;
-import dev.vitorsilverio.gbaemu.memory.GbaMemory;
+import dev.vitorsilverio.gbaemu.memory.GbaBus;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -21,7 +21,7 @@ class GbaCpuTraceLoggerTest {
     void printsHeadImmediatelyAndFlushesTailAtTheEnd() {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         GbaCpuTraceLogger trace = new GbaCpuTraceLogger(new PrintStream(bytes, true, StandardCharsets.UTF_8), 2, 2);
-        ArmCore core = new ArmCore(GbaMemory.withoutBios(new byte[0]), SwiDispatcher.empty());
+        ArmCore core = new ArmCore(new GbaBus(), SwiDispatcher.empty());
 
         for (int i = 0; i < 5; i++) {
             trace.afterInstruction(core, instruction(0x100 + i * 2));

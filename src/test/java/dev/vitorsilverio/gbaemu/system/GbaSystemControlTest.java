@@ -1,6 +1,5 @@
 package dev.vitorsilverio.gbaemu.system;
 
-import dev.vitorsilverio.gbaemu.memory.GbaMemory;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -10,19 +9,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class GbaSystemControlTest {
     @Test
     void postBootFlagIsStoredInPostflgBitZero() {
-        GbaMemory memory = GbaMemory.withoutBios(new byte[0]);
-        GbaSystemControl system = new GbaSystemControl(memory);
+        GbaSystemControl system = new GbaSystemControl();
 
         system.setPostBootFlag(true);
 
         assertTrue(system.postBootFlag());
-        assertEquals(1, memory.read8(GbaSystemControl.POSTFLG));
+        assertEquals(1, system.readByte(GbaSystemControl.POSTFLG));
     }
 
     @Test
     void waitcntRoundTripsThroughMemory() {
-        GbaMemory memory = GbaMemory.withoutBios(new byte[0]);
-        GbaSystemControl system = new GbaSystemControl(memory);
+        GbaSystemControl system = new GbaSystemControl();
 
         system.setWaitControl(0x4317);
 
@@ -31,8 +28,7 @@ class GbaSystemControlTest {
 
     @Test
     void haltcntBitSevenChoosesHaltOrStop() {
-        GbaMemory memory = GbaMemory.withoutBios(new byte[0]);
-        GbaSystemControl system = new GbaSystemControl(memory);
+        GbaSystemControl system = new GbaSystemControl();
 
         system.writeHaltControl(0);
         assertTrue(system.halted());
@@ -45,8 +41,7 @@ class GbaSystemControlTest {
 
     @Test
     void resumeClearsLowPowerState() {
-        GbaMemory memory = GbaMemory.withoutBios(new byte[0]);
-        GbaSystemControl system = new GbaSystemControl(memory);
+        GbaSystemControl system = new GbaSystemControl();
         system.writeHaltControl(0);
 
         system.resume();

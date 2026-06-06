@@ -158,21 +158,21 @@ public final class Main {
             int base = 0x04000100 + timer * 4;
             System.out.printf("TM%dCNT_L=0x%04X TM%dCNT_H=0x%04X%n",
                     timer,
-                    console.memory().read16(base),
+                    console.bus().read16(base),
                     timer,
-                    console.memory().read16(base + 2));
+                    console.bus().read16(base + 2));
         }
         for (int dma = 0; dma < 4; dma++) {
             int base = 0x040000B0 + dma * 12;
             System.out.printf("DMA%dSAD=0x%08X DMA%dDAD=0x%08X DMA%dCNT_L=0x%04X DMA%dCNT_H=0x%04X%n",
                     dma,
-                    console.memory().read32(base),
+                    console.bus().read32(base),
                     dma,
-                    console.memory().read32(base + 4),
+                    console.bus().read32(base + 4),
                     dma,
-                    console.memory().read16(base + 8),
+                    console.bus().read16(base + 8),
                     dma,
-                    console.memory().read16(base + 10));
+                    console.bus().read16(base + 10));
         }
         printVisibleObjects(console, 16);
         printMemoryWords(console, 0x02000000, 16);
@@ -196,30 +196,30 @@ public final class Main {
     }
 
     private static void printIo16(GbaConsole console, String name, int address) {
-        System.out.printf("%s=0x%04X%n", name, console.memory().read16(address));
+        System.out.printf("%s=0x%04X%n", name, console.bus().read16(address));
     }
 
     private static void printMemoryWords(GbaConsole console, int address, int words) {
         System.out.printf("mem[0x%08X]:", address);
         for (int i = 0; i < words; i++) {
-            System.out.printf(" %08X", console.memory().read32(address + i * 4));
+            System.out.printf(" %08X", console.bus().read32(address + i * 4));
         }
         System.out.println();
     }
 
     private static void printHeapChain(GbaConsole console, int headAddress, int limit) {
-        int node = console.memory().read32(headAddress);
+        int node = console.bus().read32(headAddress);
         System.out.printf("heap head[0x%08X]=0x%08X%n", headAddress, node);
         for (int i = 0; i < limit && node >= 0x02000000 && node < 0x02040000; i++) {
             System.out.printf(
                     "heap[%02d] node=0x%08X flags=0x%04X size=0x%08X prev=0x%08X next=0x%08X%n",
                     i,
                     node,
-                    console.memory().read16(node),
-                    console.memory().read32(node + 4),
-                    console.memory().read32(node + 8),
-                    console.memory().read32(node + 12));
-            node = console.memory().read32(node + 12);
+                    console.bus().read16(node),
+                    console.bus().read32(node + 4),
+                    console.bus().read32(node + 8),
+                    console.bus().read32(node + 12));
+            node = console.bus().read32(node + 12);
         }
     }
 
@@ -227,9 +227,9 @@ public final class Main {
         int printed = 0;
         for (int object = 0; object < 128 && printed < limit; object++) {
             int base = 0x07000000 + object * 8;
-            int attr0 = console.memory().read16(base);
-            int attr1 = console.memory().read16(base + 2);
-            int attr2 = console.memory().read16(base + 4);
+            int attr0 = console.bus().read16(base);
+            int attr1 = console.bus().read16(base + 2);
+            int attr2 = console.bus().read16(base + 4);
             boolean affine = (attr0 & (1 << 8)) != 0;
             boolean disabled = !affine && (attr0 & (1 << 9)) != 0;
             int objectMode = (attr0 >>> 10) & 0x3;

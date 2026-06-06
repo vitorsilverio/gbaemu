@@ -1,6 +1,6 @@
 package dev.vitorsilverio.gbaemu.cartridge;
 
-import dev.vitorsilverio.gbaemu.memory.GbaMemory;
+import dev.vitorsilverio.gbaemu.memory.GbaBus;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -46,14 +46,15 @@ class GbaSaveMemoryTest {
     }
 
     @Test
-    void gbaMemoryUsesProvidedSaveMemoryForSramRegion() {
+    void busUsesSaveMemoryForSramRegion() {
         GbaSaveMemory save = GbaSaveMemory.forType(GbaSaveType.SRAM);
-        GbaMemory memory = GbaMemory.withoutBios(new byte[0], save);
+        GbaBus bus = new GbaBus();
+        bus.add(save);
 
-        memory.write8(0x0E000000, 0x5A);
+        bus.write8(0x0E000000, 0x5A);
 
         assertEquals(0x5A, save.read8(0));
-        assertEquals(0x5A, memory.read8(0x0E010000));
+        assertEquals(0x5A, bus.read8(0x0E010000));
     }
 
     @Test

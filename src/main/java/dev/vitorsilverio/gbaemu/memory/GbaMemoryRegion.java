@@ -49,4 +49,13 @@ public enum GbaMemoryRegion {
     public int offset(int address) {
         return Math.floorMod(address - start, mirrorSize);
     }
+
+    public static GbaMemoryRegion regionFor(int address) {
+        for (GbaMemoryRegion region : values()) {
+            if (region.contains(address)) {
+                return region;
+            }
+        }
+        return null;
+    }
 }

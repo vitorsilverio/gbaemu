@@ -1,9 +1,12 @@
 package dev.vitorsilverio.gbaemu.cartridge;
 
+import dev.vitorsilverio.gbaemu.core.MemorySpace;
+import dev.vitorsilverio.gbaemu.memory.GbaMemoryRegion;
+
 import java.util.Arrays;
 
 /// Memoria persistente inicial de cartucho.
-public final class GbaSaveMemory {
+public final class GbaSaveMemory implements MemorySpace {
     public static final int SRAM_SIZE = 64 * 1024;
     public static final int FLASH_1M_SIZE = 128 * 1024;
     private static final int FLASH_BANK_SIZE = 64 * 1024;
@@ -42,6 +45,21 @@ public final class GbaSaveMemory {
 
     public int size() {
         return data.length;
+    }
+
+    @Override
+    public boolean contains(int address) {
+        return GbaMemoryRegion.SRAM.contains(address);
+    }
+
+    @Override
+    public int readByte(int address) {
+        return read8(GbaMemoryRegion.SRAM.offset(address));
+    }
+
+    @Override
+    public void writeByte(int address, int value) {
+        write8(GbaMemoryRegion.SRAM.offset(address), value);
     }
 
     public int read8(int address) {

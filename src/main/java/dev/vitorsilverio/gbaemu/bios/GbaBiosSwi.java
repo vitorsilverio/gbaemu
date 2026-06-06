@@ -1,9 +1,9 @@
 package dev.vitorsilverio.gbaemu.bios;
 
+import dev.vitorsilverio.armjitter.memory.AddressSpace;
 import dev.vitorsilverio.armjitter.swi.CpuState;
 import dev.vitorsilverio.armjitter.swi.SwiDispatcher;
 import dev.vitorsilverio.gbaemu.audio.GbaAudio;
-import dev.vitorsilverio.gbaemu.memory.GbaMemory;
 import dev.vitorsilverio.gbaemu.system.GbaSystemControl;
 
 import java.util.ArrayList;
@@ -67,7 +67,7 @@ public final class GbaBiosSwi {
     private GbaBiosSwi() {
     }
 
-    public static SwiDispatcher dispatcher(GbaMemory memory, GbaSystemControl systemControl) {
+    public static SwiDispatcher dispatcher(AddressSpace memory, GbaSystemControl systemControl) {
         SwiDispatcher dispatcher = SwiDispatcher.empty();
         register(dispatcher, SWI_SOFT_RESET, state -> softReset(memory, state));
         register(dispatcher, SWI_REGISTER_RAM_RESET, state -> registerRamReset(memory, state));
@@ -140,33 +140,23 @@ public final class GbaBiosSwi {
         });
     }
 
-    private static CpuState softReset(GbaMemory memory, CpuState state) {
+    private static CpuState softReset(AddressSpace memory, CpuState state) {
         int target = memory.read8(SOFT_RESET_FLAG) == 0 ? ROM_ENTRY_POINT : MULTIBOOT_ENTRY_POINT;
         return new CpuState(0, 0, 0, 0, 0x03007F00, 0, target, state.cpsr() & ~0x20);
     }
 
-    private static CpuState hardReset(GbaMemory memory, CpuState state) {
+    private static CpuState hardReset(AddressSpace memory, CpuState state) {
         memory.write8(SOFT_RESET_FLAG, 0);
         return softReset(memory, state);
     }
 
-    private static CpuState registerRamReset(GbaMemory memory, CpuState state) {
+    private static CpuState registerRamReset(AddressSpace memory, CpuState state) {
         int flags = state.r0();
-        if ((flags & 0x01) != 0) {
-            fill(memory, 0x02000000, GbaMemory.EWRAM_SIZE, 0);
-        }
-        if ((flags & 0x02) != 0) {
-            fill(memory, 0x03000000, GbaMemory.IWRAM_SIZE, 0);
-        }
-        if ((flags & 0x04) != 0) {
-            fill(memory, 0x05000000, GbaMemory.PALETTE_SIZE, 0);
-        }
-        if ((flags & 0x08) != 0) {
-            fill(memory, 0x06000000, GbaMemory.VRAM_SIZE, 0);
-        }
-        if ((flags & 0x10) != 0) {
-            fill(memory, 0x07000000, GbaMemory.OAM_SIZE, 0);
-        }
+        if ((flags & 0x01) != 0) fill(memory, 0x02000000, 256 * 1024, 0);
+        if ((flags & 0x02) != 0) fill(memory, 0x03000000,  32 * 1024, 0);
+        if ((flags & 0x04) != 0) fill(memory, 0x05000000,       1024, 0);
+        if ((flags & 0x08) != 0) fill(memory, 0x06000000,  96 * 1024, 0);
+        if ((flags & 0x10) != 0) fill(memory, 0x07000000,       1024, 0);
         return state;
     }
 
@@ -234,7 +224,7 @@ public final class GbaBiosSwi {
         return state.withR0(BIOS_CHECKSUM);
     }
 
-    private static CpuState cpuSet(GbaMemory memory, CpuState state) {
+    private static CpuState cpuSet(AddressSpace memory, CpuState state) {
         int source = state.r0();
         int destination = state.r1();
         int mode = state.r2();
@@ -263,7 +253,7 @@ public final class GbaBiosSwi {
         return state;
     }
 
-    private static CpuState cpuFastSet(GbaMemory memory, CpuState state) {
+    private static CpuState cpuFastSet(AddressSpace memory, CpuState state) {
         int source = state.r0();
         int destination = state.r1();
         int mode = state.r2();
@@ -290,7 +280,7 @@ public final class GbaBiosSwi {
         return state;
     }
 
-    private static CpuState bgAffineSet(GbaMemory memory, CpuState state) {
+    private static CpuState bgAffineSet(AddressSpace memory, CpuState state) {
         int source = state.r0();
         int destination = state.r1();
         int count = state.r2();
@@ -326,7 +316,7 @@ public final class GbaBiosSwi {
         return state;
     }
 
-    private static CpuState objAffineSet(GbaMemory memory, CpuState state) {
+    private static CpuState objAffineSet(AddressSpace memory, CpuState state) {
         int source = state.r0();
         int destination = state.r1();
         int count = state.r2();
@@ -355,7 +345,7 @@ public final class GbaBiosSwi {
         return state;
     }
 
-    private static CpuState bitUnPack(GbaMemory memory, CpuState state) {
+    private static CpuState bitUnPack(AddressSpace memory, CpuState state) {
         int source = state.r0();
         int destination = state.r1();
         int descriptor = state.r2();
@@ -393,7 +383,7 @@ public final class GbaBiosSwi {
         return state;
     }
 
-    private static CpuState lz77UnComp(GbaMemory memory, CpuState state, boolean vram) {
+    private static CpuState lz77UnComp(AddressSpace memory, CpuState state, boolean vram) {
         int source = state.r0();
         int destination = state.r1();
         int header = memory.read32(source);
@@ -431,7 +421,7 @@ public final class GbaBiosSwi {
         return state;
     }
 
-    private static CpuState rlUnComp(GbaMemory memory, CpuState state, boolean vram) {
+    private static CpuState rlUnComp(AddressSpace memory, CpuState state, boolean vram) {
         int source = state.r0();
         int destination = state.r1();
         int header = memory.read32(source);
@@ -466,7 +456,7 @@ public final class GbaBiosSwi {
         return state;
     }
 
-    private static CpuState huffUnComp(GbaMemory memory, CpuState state) {
+    private static CpuState huffUnComp(AddressSpace memory, CpuState state) {
         int source = state.r0() & ~3;
         int destination = state.r1();
         int header = memory.read32(source);
@@ -532,7 +522,7 @@ public final class GbaBiosSwi {
                 state.cpsr());
     }
 
-    private static CpuState diff8BitUnFilter(GbaMemory memory, CpuState state, boolean vram) {
+    private static CpuState diff8BitUnFilter(AddressSpace memory, CpuState state, boolean vram) {
         int source = state.r0();
         int destination = state.r1();
         int header = memory.read32(source);
@@ -550,7 +540,7 @@ public final class GbaBiosSwi {
         return state;
     }
 
-    private static CpuState diff16BitUnFilter(GbaMemory memory, CpuState state) {
+    private static CpuState diff16BitUnFilter(AddressSpace memory, CpuState state) {
         int source = state.r0();
         int destination = state.r1();
         int header = memory.read32(source);
@@ -566,12 +556,12 @@ public final class GbaBiosSwi {
         return state;
     }
 
-    private static CpuState soundBias(GbaMemory memory, CpuState state) {
+    private static CpuState soundBias(AddressSpace memory, CpuState state) {
         memory.write16(GbaAudio.SOUNDBIAS, state.r0() == 0 ? 0 : 0x0200);
         return state;
     }
 
-    private static CpuState soundChannelClear(GbaMemory memory, CpuState state) {
+    private static CpuState soundChannelClear(AddressSpace memory, CpuState state) {
         for (int address = 0x04000060; address <= GbaAudio.SOUNDCNT_X; address += 2) {
             memory.write16(address, 0);
         }
@@ -583,7 +573,7 @@ public final class GbaBiosSwi {
         return state.withR0(0);
     }
 
-    private static void writeDecompressed(GbaMemory memory, int destination, byte[] output, boolean vram) {
+    private static void writeDecompressed(AddressSpace memory, int destination, byte[] output, boolean vram) {
         if (!vram) {
             for (int i = 0; i < output.length; i++) {
                 memory.write8(destination + i, output[i]);
@@ -597,7 +587,7 @@ public final class GbaBiosSwi {
         }
     }
 
-    private static void fill(GbaMemory memory, int start, int size, int value) {
+    private static void fill(AddressSpace memory, int start, int size, int value) {
         for (int offset = 0; offset < size; offset += 4) {
             memory.write32(start + offset, value);
         }
@@ -613,7 +603,7 @@ public final class GbaBiosSwi {
         }
     }
 
-    private static int heapWord(GbaMemory memory, int address, int offset) {
+    private static int heapWord(AddressSpace memory, int address, int offset) {
         if (address < 0x02000000 || address >= 0x02040000) {
             return 0;
         }

@@ -1,32 +1,57 @@
 package dev.vitorsilverio.gbaemu.input;
 
-import dev.vitorsilverio.armjitter.memory.AddressSpace;
+import dev.vitorsilverio.gbaemu.core.MemorySpace;
 import dev.vitorsilverio.gbaemu.interrupt.GbaInterrupt;
 import dev.vitorsilverio.gbaemu.interrupt.GbaInterruptController;
 
-/// Estado inicial do keypad do GBA.
+/// Estado do keypad do GBA.
 ///
 /// KEYINPUT usa logica active-low: bit 0 significa botao pressionado.
-public final class GbaKeypad {
+public final class GbaKeypad implements MemorySpace {
     public static final int KEYINPUT = 0x04000130;
-    public static final int KEYCNT = 0x04000132;
+    public static final int KEYCNT   = 0x04000132;
 
-    private static final int KEY_MASK = 0x03FF;
-    private static final int IRQ_ENABLE = 1 << 14;
+    private static final int KEY_MASK        = 0x03FF;
+    private static final int IRQ_ENABLE      = 1 << 14;
     private static final int IRQ_AND_CONDITION = 1 << 15;
 
-    private final AddressSpace memory;
     private final GbaInterruptController interrupts;
     private int pressedMask;
+    private int keycnt;
 
-    public GbaKeypad(AddressSpace memory) {
-        this(memory, null);
+    public GbaKeypad(GbaInterruptController interrupts) {
+        this.interrupts = interrupts;
     }
 
-    public GbaKeypad(AddressSpace memory, GbaInterruptController interrupts) {
-        this.memory = memory;
-        this.interrupts = interrupts;
-        updateKeyInput();
+    @Override
+    public boolean contains(int address) {
+        return address >= KEYINPUT && address <= KEYCNT + 1;
+    }
+
+    @Override
+    public int readByte(int address) {
+        return readHalfWord(address & ~1) >>> ((address & 1) * 8) & 0xFF;
+    }
+
+    @Override
+    public int readHalfWord(int address) {
+        if ((address & ~1) == KEYINPUT) return KEY_MASK & ~pressedMask;
+        if ((address & ~1) == KEYCNT)   return keycnt & 0xFFFF;
+        return 0;
+    }
+
+    @Override
+    public void writeByte(int address, int value) {
+        if ((address & ~1) == KEYCNT) {
+            int shift = (address & 1) * 8;
+            int mask = 0xFF << shift;
+            keycnt = (keycnt & ~mask) | ((value & 0xFF) << shift);
+        }
+    }
+
+    @Override
+    public void writeHalfWord(int address, int value) {
+        if ((address & ~1) == KEYCNT) keycnt = value & 0xFFFF;
     }
 
     public void press(GbaButton button) {
@@ -38,12 +63,8 @@ public final class GbaKeypad {
     }
 
     public void setPressed(GbaButton button, boolean pressed) {
-        if (pressed) {
-            pressedMask |= button.mask();
-        } else {
-            pressedMask &= ~button.mask();
-        }
-        updateKeyInput();
+        if (pressed) pressedMask |= button.mask();
+        else pressedMask &= ~button.mask();
         requestInterruptIfNeeded();
     }
 
@@ -55,36 +76,13 @@ public final class GbaKeypad {
         return pressedMask;
     }
 
-    public int keyInput() {
-        return memory.read16(KEYINPUT) & KEY_MASK;
-    }
-
-    private void updateKeyInput() {
-        int keyInput = KEY_MASK & ~pressedMask;
-        memory.write8(KEYINPUT, keyInput);
-        memory.write8(KEYINPUT + 1, keyInput >>> 8);
-    }
-
     private void requestInterruptIfNeeded() {
-        if (interrupts == null) {
-            return;
-        }
-
-        int keycnt = memory.read16(KEYCNT);
-        if ((keycnt & IRQ_ENABLE) == 0) {
-            return;
-        }
-
+        if (interrupts == null || (keycnt & IRQ_ENABLE) == 0) return;
         int selected = keycnt & KEY_MASK;
-        if (selected == 0) {
-            return;
-        }
-
+        if (selected == 0) return;
         boolean matches = (keycnt & IRQ_AND_CONDITION) != 0
                 ? (pressedMask & selected) == selected
                 : (pressedMask & selected) != 0;
-        if (matches) {
-            interrupts.request(GbaInterrupt.KEYPAD);
-        }
+        if (matches) interrupts.request(GbaInterrupt.KEYPAD);
     }
 }

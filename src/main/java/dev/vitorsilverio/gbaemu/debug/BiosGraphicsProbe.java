@@ -17,7 +17,7 @@ public final class BiosGraphicsProbe {
                 Files.readAllBytes(Path.of("pokefirered.gba")));
         console.stepCpu(steps);
 
-        var memory = console.memory();
+        var memory = console.bus();
         System.out.printf("PC=%08X DISPCNT=%04X VCOUNT=%d%n",
                 console.cpu().programCounter(),
                 memory.read16(0x04000000),
@@ -58,7 +58,7 @@ public final class BiosGraphicsProbe {
         }
     }
 
-    private static void printObject(dev.vitorsilverio.gbaemu.memory.GbaMemory memory, int object, int attr0, int attr1, int attr2) {
+    private static void printObject(dev.vitorsilverio.armjitter.memory.AddressSpace memory, int object, int attr0, int attr1, int attr2) {
         int shape = (attr0 >>> 14) & 3;
         int size = (attr1 >>> 14) & 3;
         int matrix = (attr1 >>> 9) & 31;

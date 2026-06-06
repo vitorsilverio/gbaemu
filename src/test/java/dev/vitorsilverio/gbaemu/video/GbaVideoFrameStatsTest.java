@@ -1,6 +1,6 @@
 package dev.vitorsilverio.gbaemu.video;
 
-import dev.vitorsilverio.gbaemu.memory.GbaMemory;
+import dev.vitorsilverio.gbaemu.memory.GbaBus;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -8,18 +8,27 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GbaVideoFrameStatsTest {
+
+    private static GbaBus createBus() {
+        GbaLcdTiming lcdTiming = new GbaLcdTiming(null);
+        GbaBus bus = new GbaBus();
+        bus.add(lcdTiming);
+        bus.add(new GbaVideoMemory(() -> lcdTiming.readByte(0x04000000) & 0x7));
+        return bus;
+    }
+
     @Test
     void capturesDisplayRegistersAndFrameDiversity() {
-        GbaMemory memory = GbaMemory.withoutBios(new byte[0]);
+        GbaBus bus = createBus();
         GbaVideo video = new GbaVideo();
 
-        memory.write16(0x04000000, 0x0403);
-        memory.write16(0x05000000, 0x0000);
-        memory.write16(0x05000002, 0x03E0);
-        memory.write16(0x06000000, 0x001F);
+        bus.write16(0x04000000, 0x0403);
+        bus.write16(0x05000000, 0x0000);
+        bus.write16(0x05000002, 0x03E0);
+        bus.write16(0x06000000, 0x001F);
 
-        int[] frame = video.renderFrame(memory);
-        GbaVideoFrameStats stats = GbaVideoFrameStats.capture(memory, frame);
+        int[] frame = video.renderFrame(bus);
+        GbaVideoFrameStats stats = GbaVideoFrameStats.capture(bus, frame);
 
         assertEquals(0x0403, stats.dispcnt());
         assertEquals(3, stats.mode());
@@ -33,15 +42,15 @@ class GbaVideoFrameStatsTest {
 
     @Test
     void reportsForcedBlankAndVisibleObjects() {
-        GbaMemory memory = GbaMemory.withoutBios(new byte[0]);
+        GbaBus bus = createBus();
         GbaVideo video = new GbaVideo();
 
-        memory.write16(0x04000000, 0x1080);
-        memory.write16(0x07000000, 1 << 9);
-        memory.write16(0x07000008, 0);
+        bus.write16(0x04000000, 0x1080);
+        bus.write16(0x07000000, 1 << 9);
+        bus.write16(0x07000008, 0);
 
-        int[] frame = video.renderFrame(memory);
-        GbaVideoFrameStats stats = GbaVideoFrameStats.capture(memory, frame);
+        int[] frame = video.renderFrame(bus);
+        GbaVideoFrameStats stats = GbaVideoFrameStats.capture(bus, frame);
 
         assertTrue(stats.forcedBlank());
         assertTrue(stats.objectsEnabled());

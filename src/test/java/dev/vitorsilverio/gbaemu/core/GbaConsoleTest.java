@@ -12,8 +12,8 @@ class GbaConsoleTest {
 
         assertEquals(GbaConsole.ROM_ENTRY_POINT, console.cpu().programCounter());
         assertEquals(GbaConsole.USER_STACK_POINTER, console.cpu().register(13));
-        assertEquals(1, console.memory().read8(0x04000300));
-        assertEquals(0, console.memory().read32(GbaConsole.ROM_ENTRY_POINT));
+        assertEquals(1, console.bus().read8(0x04000300));
+        assertEquals(0, console.bus().read32(GbaConsole.ROM_ENTRY_POINT));
         assertNotNull(console.runtime());
         assertNotNull(console.video());
         assertNotNull(console.lcdTiming());
@@ -37,8 +37,8 @@ class GbaConsoleTest {
 
         assertEquals(GbaConsole.BIOS_ENTRY_POINT, console.cpu().programCounter());
         assertEquals(GbaConsole.SUPERVISOR_STACK_POINTER, console.cpu().register(13));
-        assertEquals(0, console.memory().read8(0x04000300));
-        assertEquals(0x44332211, console.memory().read32(GbaConsole.BIOS_ENTRY_POINT));
+        assertEquals(0, console.bus().read8(0x04000300));
+        assertEquals(0x44332211, console.bus().read32(GbaConsole.BIOS_ENTRY_POINT));
     }
 
     @Test
@@ -53,8 +53,8 @@ class GbaConsoleTest {
 
         assertEquals(GbaConsole.ROM_ENTRY_POINT, console.cpu().programCounter());
         assertEquals(GbaConsole.USER_STACK_POINTER, console.cpu().register(13));
-        assertEquals(1, console.memory().read8(0x04000300));
-        assertEquals(0x44332211, console.memory().read32(GbaConsole.BIOS_ENTRY_POINT));
+        assertEquals(1, console.bus().read8(0x04000300));
+        assertEquals(0x44332211, console.bus().read32(GbaConsole.BIOS_ENTRY_POINT));
     }
 
     @Test
@@ -66,7 +66,7 @@ class GbaConsoleTest {
 
         assertEquals(GbaConsole.ROM_ENTRY_POINT, console.cpu().programCounter());
         assertEquals(GbaConsole.USER_STACK_POINTER, console.cpu().register(13));
-        assertEquals(1, console.memory().read8(0x04000300));
+        assertEquals(1, console.bus().read8(0x04000300));
     }
 
     private static byte[] minimalRom() {
