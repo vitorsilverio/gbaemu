@@ -46,6 +46,12 @@ public final class GbaBus implements AddressSpace {
 
     @Override
     public int read16(int address) {
+        if (GbaMemoryRegion.SRAM.contains(address)) {
+            // SRAM/Flash sit on an 8-bit bus: a 16-bit read fetches one byte and
+            // mirrors it across both lanes (byte * 0x0101).
+            int b = read8(address & ~1) & 0xFF;
+            return b | (b << 8);
+        }
         int aligned = address & ~1;
         for (MemorySpace space : spaces) {
             if (space.contains(aligned)) {
@@ -57,6 +63,11 @@ public final class GbaBus implements AddressSpace {
 
     @Override
     public int read32(int address) {
+        if (GbaMemoryRegion.SRAM.contains(address)) {
+            // 8-bit bus: a 32-bit read mirrors the single byte across all lanes.
+            int b = read8(address & ~3) & 0xFF;
+            return b * 0x01010101;
+        }
         int aligned = address & ~3;
         for (MemorySpace space : spaces) {
             if (space.contains(aligned)) {
@@ -79,6 +90,12 @@ public final class GbaBus implements AddressSpace {
 
     @Override
     public void write16(int address, int value) {
+        if (GbaMemoryRegion.SRAM.contains(address)) {
+            // 8-bit bus: only the byte facing the chip is written, selected by the
+            // low address bits (value rotated right by 8*(addr&3)).
+            write8(address, value >>> (8 * (address & 3)));
+            return;
+        }
         int aligned = address & ~1;
         for (MemorySpace space : spaces) {
             if (space.contains(aligned)) {
@@ -90,6 +107,12 @@ public final class GbaBus implements AddressSpace {
 
     @Override
     public void write32(int address, int value) {
+        if (GbaMemoryRegion.SRAM.contains(address)) {
+            // 8-bit bus: a 32-bit store also writes a single byte (the lane facing
+            // the chip), not all four.
+            write8(address, value >>> (8 * (address & 3)));
+            return;
+        }
         int aligned = address & ~3;
         for (MemorySpace space : spaces) {
             if (space.contains(aligned)) {

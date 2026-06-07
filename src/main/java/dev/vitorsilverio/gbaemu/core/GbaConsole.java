@@ -181,9 +181,10 @@ public final class GbaConsole {
     }
 
     public void applySkipBiosState() {
-        cpu.configureExecutionState(ROM_ENTRY_POINT, CpuMode.SYSTEM, InstructionSet.ARM, true, true);
+        cpu.configureExecutionState(ROM_ENTRY_POINT, CpuMode.SYSTEM, InstructionSet.ARM, false, true);
         cpu.setRegister(13, USER_STACK_POINTER);
         cpu.setRegister(14, 0);
+        cpu.setBankedRegister(CpuMode.IRQ, 13, IRQ_STACK_POINTER);
         systemControl.setPostBootFlag(true);
     }
 
