@@ -180,9 +180,40 @@ class GbaDmaControllerTest {
         ctx.dma.triggerAudioFifoTransfers(GbaAudio.FIFO_A_REQUEST);
 
         assertEquals(16, ctx.audio.fifoASize());
-        assertEquals(0x02000010, ctx.dma.readWord(0x040000BC));
+        // SAD is write-only on hardware: the register keeps the buffer start; only the
+        // internal pointer advances. (Previously this wrongly asserted 0x02000010.)
+        assertEquals(0x02000000, ctx.dma.readWord(0x040000BC));
         assertEquals(GbaAudio.FIFO_A, ctx.dma.readWord(0x040000C0));
         assertEquals(0x11, ctx.audio.popFifoA());
         assertEquals(0x22, ctx.audio.popFifoA());
+    }
+
+    @Test
+    void reenablingSoundDmaRestartsFromTheBufferStart() {
+        Ctx ctx = createCtx();
+        ctx.bus.write32(0x02000000, 0x44332211);
+        ctx.bus.write32(0x02000004, 0x88776655);
+        ctx.bus.write32(0x02000008, 0xCCBBAA99);
+        ctx.bus.write32(0x0200000C, 0x00FFEEDD);
+        int control = (1 << 15) | (1 << 9) | (3 << 12) | (1 << 10); // enable, repeat, special, word
+        setupDma(ctx.dma, 1, 0x02000000, GbaAudio.FIFO_A, 0, control);
+
+        ctx.dma.triggerAudioFifoTransfers(GbaAudio.FIFO_A_REQUEST);
+        for (int i = 0; i < 16; i++) {
+            ctx.audio.popFifoA(); // drain the first refill; the internal pointer advanced
+        }
+
+        // The game (m4a) re-enables the DMA every frame WITHOUT rewriting the source,
+        // relying on the enable to reload the buffer start from the SAD register.
+        ctx.dma.writeHalfWord(0x040000C6, 0);        // disable
+        ctx.dma.writeHalfWord(0x040000C6, control);  // re-enable -> reload internal source
+
+        ctx.dma.triggerAudioFifoTransfers(GbaAudio.FIFO_A_REQUEST);
+
+        // Must replay from the buffer start, not continue past it into adjacent memory.
+        assertEquals(0x11, ctx.audio.popFifoA());
+        assertEquals(0x22, ctx.audio.popFifoA());
+        assertEquals(0x33, ctx.audio.popFifoA());
+        assertEquals(0x44, ctx.audio.popFifoA());
     }
 }

@@ -3,7 +3,6 @@ package dev.vitorsilverio.gbaemu.desktop;
 import dev.vitorsilverio.gbaemu.core.GbaConsole;
 import dev.vitorsilverio.gbaemu.input.GbaButton;
 import dev.vitorsilverio.gbaemu.video.GbaLcdTiming;
-import dev.vitorsilverio.gbaemu.video.GbaVideoFrameStats;
 
 import javax.swing.JFrame;
 import javax.swing.SwingUtilities;
@@ -13,11 +12,21 @@ import java.awt.event.KeyEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.LockSupport;
 
 /// Janela Swing simples para visualizar o framebuffer enquanto a emulacao roda.
+///
+/// A emulacao roda numa thread dedicada, ritmada pela placa de som (o write
+/// bloqueante de {@link GbaAudioOutput#pump()} e o relogio de tempo real). A
+/// renderizacao do video acontece no EDT, numa cadencia propria e desacoplada, para
+/// nunca roubar tempo do caminho critico do audio. A thread de emulacao le/escreve o
+/// estado do console enquanto o EDT le a VRAM para desenhar; eventuais "tearing" sao
+/// aceitaveis aqui e muito menos perceptiveis que falhas de audio.
 public final class GbaSwingWindow {
     public static final int DEFAULT_CYCLES_PER_FRAME =
             GbaLcdTiming.CYCLES_PER_SCANLINE * GbaLcdTiming.TOTAL_SCANLINES;
+    private static final long FRAME_NANOS = 1_000_000_000L / 60;
 
     private GbaSwingWindow() {
     }
@@ -44,6 +53,7 @@ public final class GbaSwingWindow {
             throw new IllegalArgumentException("cyclesPerFrame must be >= 0");
         }
         CountDownLatch closed = new CountDownLatch(1);
+        AtomicBoolean running = new AtomicBoolean(false);
 
         SwingUtilities.invokeLater(() -> {
             GbaFramePanel panel = new GbaFramePanel(scale);
@@ -65,47 +75,53 @@ public final class GbaSwingWindow {
                 }
             });
 
-            Timer timer = new Timer(16, null);
+            boolean audioIsClock = audioOutput.isActive();
+            Thread emulationThread = new Thread(
+                    () -> runEmulation(console, audioOutput, audioIsClock, stepsPerFrame, cyclesPerFrame, running, frame),
+                    "gba-emulation");
+            emulationThread.setDaemon(true);
+
+            // Video pump on the EDT: decoupled from emulation, so a slow render frame
+            // never starves the sound card.
             final int[] renderedFrames = {0};
-            timer.addActionListener(event -> {
+            Timer renderTimer = new Timer(16, event -> {
                 try {
-                    if (stepsPerFrame > 0) {
-                        console.stepCpu(stepsPerFrame);
-                    } else if (cyclesPerFrame > 0) {
-                        console.runCycles(cyclesPerFrame);
-                    }
                     int[] renderedFrame = console.renderFrame();
-                    GbaVideoFrameStats stats = console.videoFrameStats(renderedFrame);
                     panel.setFrame(renderedFrame);
-                    audioOutput.pump();
-                    frame.setTitle(statusTitle(console, "running", stats));
+                    frame.setTitle(statusTitle(console, running.get() ? "running" : "paused"));
                     if (debugVideo && renderedFrames[0]++ % 60 == 0) {
-                        System.out.println("video: " + stats.compactSummary());
+                        System.out.println("video: " + console.videoFrameStats(renderedFrame).compactSummary());
                     }
                 } catch (RuntimeException exception) {
-                    timer.stop();
-                    frame.setTitle(statusTitle(console, "paused: " + exception.getClass().getSimpleName(), null));
-                    System.err.println("Emulation paused at PC=0x"
-                            + Integer.toHexString(console.cpu().programCounter())
-                            + ": " + exception);
+                    // A torn read during rendering is harmless; skip this frame.
                 }
             });
+
             frame.addWindowListener(new WindowAdapter() {
                 @Override
                 public void windowClosed(WindowEvent event) {
-                    timer.stop();
-                    audioOutput.close();
+                    running.set(false);
+                    renderTimer.stop();
+                    audioOutput.close(); // unblocks the emulation thread if parked in write()
+                    try {
+                        emulationThread.join(1000);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                    }
                     closed.countDown();
                 }
             });
+
             int[] renderedFrame = console.renderFrame();
-            GbaVideoFrameStats stats = console.videoFrameStats(renderedFrame);
             panel.setFrame(renderedFrame);
-            frame.setTitle(statusTitle(console, "ready", stats));
+            frame.setTitle(statusTitle(console, "ready"));
             if (debugVideo) {
-                System.out.println("video: " + stats.compactSummary());
+                System.out.println("video: " + console.videoFrameStats(renderedFrame).compactSummary());
             }
-            timer.start();
+
+            running.set(true);
+            emulationThread.start();
+            renderTimer.start();
             frame.setVisible(true);
         });
         if (!SwingUtilities.isEventDispatchThread()) {
@@ -113,18 +129,48 @@ public final class GbaSwingWindow {
         }
     }
 
-    private static String statusTitle(GbaConsole console, String state, GbaVideoFrameStats stats) {
-        String title = "gbaemu - " + state
+    private static void runEmulation(
+            GbaConsole console,
+            GbaAudioOutput audioOutput,
+            boolean audioIsClock,
+            int stepsPerFrame,
+            int cyclesPerFrame,
+            AtomicBoolean running,
+            JFrame frame) {
+        long nextFrame = System.nanoTime();
+        while (running.get()) {
+            try {
+                if (stepsPerFrame > 0) {
+                    console.stepCpu(stepsPerFrame);
+                } else if (cyclesPerFrame > 0) {
+                    console.runCycles(cyclesPerFrame);
+                }
+                audioOutput.pump();
+                if (!audioIsClock) {
+                    // No sound line to pace us: fall back to a wall-clock frame pacer.
+                    nextFrame += FRAME_NANOS;
+                    long sleep = nextFrame - System.nanoTime();
+                    if (sleep > 0) {
+                        LockSupport.parkNanos(sleep);
+                    } else {
+                        nextFrame = System.nanoTime();
+                    }
+                }
+            } catch (RuntimeException exception) {
+                running.set(false);
+                String pc = Integer.toHexString(console.cpu().programCounter());
+                System.err.println("Emulation paused at PC=0x" + pc + ": " + exception);
+                SwingUtilities.invokeLater(() -> frame.setTitle(
+                        "gbaemu - paused: " + exception.getClass().getSimpleName() + " - PC=0x" + pc));
+            }
+        }
+    }
+
+    private static String statusTitle(GbaConsole console, String state) {
+        return "gbaemu - " + state
                 + " - PC=0x" + Integer.toHexString(console.cpu().programCounter())
                 + " cycles=" + console.cpu().cycles()
                 + " VCOUNT=" + console.lcdTiming().scanline();
-        if (stats != null) {
-            title += " mode=" + stats.mode()
-                    + " DISPCNT=0x" + String.format("%04X", stats.dispcnt())
-                    + " colors=" + stats.uniqueColors()
-                    + " nonBackdrop=" + stats.nonBackdropPixels();
-        }
-        return title;
     }
 
     private static void setButton(GbaConsole console, KeyEvent event, boolean pressed) {

@@ -27,6 +27,12 @@ public final class GbaDmaController implements MemorySpace {
     private static final int DEST_CONTROL_SHIFT   = 5;
 
     private final byte[] registers = new byte[4 * DMA_STRIDE];
+    // Internal source/destination pointers, latched from the (write-only) SAD/DAD
+    // registers when a channel is enabled (0->1). Transfers advance these, NOT the
+    // registers, so a repeating DMA that the game re-enables (sound FIFO) restarts
+    // from the buffer each time instead of marching forward forever.
+    private final int[] internalSource = new int[4];
+    private final int[] internalDestination = new int[4];
     private final AddressSpace bus;
     private final GbaInterruptController interrupts;
 
@@ -69,8 +75,18 @@ public final class GbaDmaController implements MemorySpace {
     @Override
     public void writeHalfWord(int address, int value) {
         int offset = (address & ~1) - DMA_BASE;
+        boolean isControl = (offset % DMA_STRIDE) == 10;
+        int channel = offset / DMA_STRIDE;
+        boolean wasEnabled = isControl && (regRead16(channel, 10) & ENABLE) != 0;
         registers[offset]     = (byte) value;
         registers[offset + 1] = (byte) (value >>> 8);
+        if (isControl && !wasEnabled && (value & ENABLE) != 0) {
+            // Enable transition 0->1: latch the internal pointers from the registers,
+            // mirroring the hardware. The registers themselves are write-only and keep
+            // the value the game wrote (e.g. the sound buffer start).
+            internalSource[channel] = regRead32(channel, 0) & sourceMask(channel);
+            internalDestination[channel] = regRead32(channel, 4) & destinationMask(channel);
+        }
     }
 
     @Override
@@ -115,14 +131,12 @@ public final class GbaDmaController implements MemorySpace {
         int unitSize = wordTransfer ? 4 : 2;
         int count = regRead16(channel, 8);
         if (count == 0) count = channel == 3 ? 0x10000 : 0x4000;
-        int source      = regRead32(channel, 0) & sourceMask(channel);
-        int destination = regRead32(channel, 4) & destinationMask(channel);
         int sourceStep      = addressStep((control >>> SOURCE_CONTROL_SHIFT) & 0x3, unitSize);
         int destinationMode = (control >>> DEST_CONTROL_SHIFT) & 0x3;
         int destinationStep = addressStep(destinationMode, unitSize);
 
-        int currentSource = source;
-        int currentDest   = destination;
+        int currentSource = internalSource[channel];
+        int currentDest   = internalDestination[channel];
         for (int i = 0; i < count; i++) {
             if (wordTransfer) bus.write32(currentDest, bus.read32(currentSource));
             else              bus.write16(currentDest, bus.read16(currentSource));
@@ -130,8 +144,12 @@ public final class GbaDmaController implements MemorySpace {
             currentDest   += destinationStep;
         }
 
-        regWrite32(channel, 0, currentSource);
-        regWrite32(channel, 4, destinationMode == 3 ? destination : currentDest);
+        // Advance the internal pointers (not the write-only registers). On repeat with
+        // dest control = reload (mode 3), the destination reloads from its register.
+        internalSource[channel] = currentSource;
+        internalDestination[channel] = destinationMode == 3
+                ? (regRead32(channel, 4) & destinationMask(channel))
+                : currentDest;
 
         if ((control & REPEAT) == 0 || startTiming(control) == START_IMMEDIATE) {
             regWrite16(channel, 10, control & ~ENABLE);
@@ -152,16 +170,17 @@ public final class GbaDmaController implements MemorySpace {
 
     private void runAudioFifo(int channel) {
         int control     = regRead16(channel, 10);
-        int source      = regRead32(channel, 0) & sourceMask(channel);
         int destination = regRead32(channel, 4) & destinationMask(channel);
         int sourceStep  = addressStep((control >>> SOURCE_CONTROL_SHIFT) & 0x3, 4);
 
-        int currentSource = source;
+        int currentSource = internalSource[channel];
         for (int i = 0; i < 4; i++) {
             bus.write32(destination, bus.read32(currentSource));
             currentSource += sourceStep;
         }
-        regWrite32(channel, 0, currentSource);
+        // Advance only the internal pointer; the SAD register keeps the buffer start so
+        // the next re-enable restarts playback from the beginning of the sound buffer.
+        internalSource[channel] = currentSource;
 
         if (interrupts != null && (control & IRQ_ON_END) != 0) {
             interrupts.request(GbaInterrupt.values()[GbaInterrupt.DMA0.ordinal() + channel]);
@@ -182,11 +201,6 @@ public final class GbaDmaController implements MemorySpace {
         int base = channel * DMA_STRIDE + byteOffset;
         registers[base]     = (byte) value;
         registers[base + 1] = (byte) (value >>> 8);
-    }
-
-    private void regWrite32(int channel, int byteOffset, int value) {
-        regWrite16(channel, byteOffset,     value);
-        regWrite16(channel, byteOffset + 2, value >>> 16);
     }
 
     private static int startTiming(int control) {

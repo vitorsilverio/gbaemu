@@ -50,12 +50,23 @@ public enum GbaMemoryRegion {
         return Math.floorMod(address - start, mirrorSize);
     }
 
-    public static GbaMemoryRegion regionFor(int address) {
+    // O(1) lookup by the high byte of the address (the GBA map is fixed in bits 24-31).
+    // The high byte alone over-approximates regions that do not fill their whole block
+    // (BIOS, IO), so the resolved region is still verified with contains().
+    private static final GbaMemoryRegion[] BY_HIGH_BYTE = new GbaMemoryRegion[256];
+
+    static {
         for (GbaMemoryRegion region : values()) {
-            if (region.contains(address)) {
-                return region;
+            int firstByte = region.start >>> 24;
+            int lastByte = region.end >>> 24;
+            for (int highByte = firstByte; highByte <= lastByte; highByte++) {
+                BY_HIGH_BYTE[highByte] = region;
             }
         }
-        return null;
+    }
+
+    public static GbaMemoryRegion regionFor(int address) {
+        GbaMemoryRegion region = BY_HIGH_BYTE[address >>> 24];
+        return (region != null && region.contains(address)) ? region : null;
     }
 }

@@ -46,6 +46,12 @@ public final class GbaAudio implements MemorySpace {
     private static final int DIRECT_SOUND_B_TIMER = 1 << 14;
     private static final int DIRECT_SOUND_B_RESET = 1 << 15;
     private static final int DIRECT_SOUND_B_VOLUME_100 = 1 << 3;
+    // Scales the summed PSG channels (0..480 after master volume) down to the same
+    // amplitude window as a Direct Sound channel so they do not swamp the mix.
+    private static final int PSG_OUTPUT_DIVISOR = 4;
+    // One-pole high-pass coefficient (~5 Hz cutoff at 32768 Hz) used to remove the
+    // PSG DC offset; close to 1.0 so it only strips DC, not audible bass.
+    private static final double PSG_HPF_DECAY = 0.999;
     private static final int[][] DUTY_PATTERNS = {
             {0, 0, 0, 0, 0, 0, 0, 1},
             {1, 0, 0, 0, 0, 0, 0, 1},
@@ -63,6 +69,8 @@ public final class GbaAudio implements MemorySpace {
     private final NoiseChannel channel4 = new NoiseChannel();
     private int lastSampleA;
     private int lastSampleB;
+    private double psgHpfPrevInput;
+    private double psgHpfPrevOutput;
     private long sampleAccumulator;
     private long frameSequencerAccumulator;
     private int frameSequencerStep;
@@ -279,6 +287,8 @@ public final class GbaAudio implements MemorySpace {
         fifoB.clear();
         lastSampleA = 0;
         lastSampleB = 0;
+        psgHpfPrevInput = 0;
+        psgHpfPrevOutput = 0;
         pcm.clear();
         sampleAccumulator = 0;
         frameSequencerAccumulator = 0;
@@ -346,11 +356,10 @@ public final class GbaAudio implements MemorySpace {
         int soundCntH = readRaw16(SOUNDCNT_H);
         int leftVolume = ((soundCntL >>> 4) & 0x7) + 1;
         int rightVolume = (soundCntL & 0x7) + 1;
-        int psgLevel = switch (soundCntH & 0x3) {
-            case 0 -> 2;
-            case 1 -> 1;
-            case 2 -> 0;
-            default -> 0;
+        int psgShift = switch (soundCntH & 0x3) {
+            case 0 -> 2;  // 25%
+            case 1 -> 1;  // 50%
+            default -> 0; // 100%
         };
 
         int ch1 = channel1.output();
@@ -367,6 +376,10 @@ public final class GbaAudio implements MemorySpace {
         if ((soundCntL & 0x2000) != 0) psgLeft += ch2;
         if ((soundCntL & 0x4000) != 0) psgLeft += ch3;
         if ((soundCntL & 0x8000) != 0) psgLeft += ch4;
+        // PSG channels carry a DC offset while active; the high-pass filter strips it
+        // so idle/held channels stop biasing (and clipping) the whole mix.
+        int psgMono = (((psgLeft * leftVolume) >> psgShift) + ((psgRight * rightVolume) >> psgShift)) / 2;
+        int psgMix = highPassPsg(psgMono / PSG_OUTPUT_DIVISOR);
 
         int directLeft = 0;
         int directRight = 0;
@@ -376,10 +389,18 @@ public final class GbaAudio implements MemorySpace {
         if ((soundCntH & 0x0200) != 0) directLeft += sampleA;
         if ((soundCntH & 0x1000) != 0) directRight += sampleB;
         if ((soundCntH & 0x2000) != 0) directLeft += sampleB;
+        int directMix = (directLeft + directRight) / 2;
+        return directMix + psgMix;
+    }
 
-        int left = directLeft + (psgLeft * leftVolume >> psgLevel);
-        int right = directRight + (psgRight * rightVolume >> psgLevel);
-        return (left + right) / 2;
+    /// One-pole high-pass filter modelling the GBA's AC-coupled PSG output: it
+    /// removes the constant bias an active square/wave/noise channel holds at its
+    /// idle DAC level, which would otherwise clip the mix to a railed value.
+    private int highPassPsg(int input) {
+        double output = input - psgHpfPrevInput + PSG_HPF_DECAY * psgHpfPrevOutput;
+        psgHpfPrevInput = input;
+        psgHpfPrevOutput = output;
+        return (int) output;
     }
 
     private void clockFrameSequencer(int cycles) {
@@ -535,12 +556,11 @@ public final class GbaAudio implements MemorySpace {
             timer = 0;
         }
 
-        int dacOutput(int digitalOutput) {
-            return 15 - digitalOutput * 2;
-        }
-
         abstract void tick(int cycles);
 
+        /// Digital DAC level in 0..15 (0 when the channel is silent/disabled).
+        /// The DC offset of an active waveform is removed by the mixer's high-pass
+        /// filter, mirroring the GBA's AC-coupled output.
         abstract int output();
     }
 
@@ -609,8 +629,7 @@ public final class GbaAudio implements MemorySpace {
                 return 0;
             }
             int duty = (sweepChannel ? readRaw16(SOUND1CNT_H) : readRaw16(SOUND2CNT_L)) >>> 14;
-            int digital = DUTY_PATTERNS[duty & 3][dutyStep] == 0 ? 0 : currentVolume;
-            return dacOutput(digital);
+            return DUTY_PATTERNS[duty & 3][dutyStep] == 0 ? 0 : currentVolume;
         }
 
         void tickLength() {
@@ -730,14 +749,13 @@ public final class GbaAudio implements MemorySpace {
                 return 0;
             }
             int volumeCode = (readRaw16(SOUND3CNT_H) >>> 13) & 0x03;
-            int digital = switch (volumeCode) {
+            return switch (volumeCode) {
                 case 0 -> 0;
                 case 1 -> lastSample;
                 case 2 -> lastSample >> 1;
                 case 3 -> lastSample >> 2;
                 default -> 0;
             };
-            return dacOutput(digital);
         }
 
         void tickLength() {
@@ -794,8 +812,7 @@ public final class GbaAudio implements MemorySpace {
             if (!enabled || (envelope & 0xF8) == 0) {
                 return 0;
             }
-            int digital = (lfsr & 1) == 0 ? currentVolume : 0;
-            return dacOutput(digital);
+            return (lfsr & 1) == 0 ? currentVolume : 0;
         }
 
         void tickLength() {

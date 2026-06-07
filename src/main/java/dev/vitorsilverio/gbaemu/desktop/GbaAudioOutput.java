@@ -7,15 +7,21 @@ import javax.sound.sampled.AudioSystem;
 import javax.sound.sampled.LineUnavailableException;
 import javax.sound.sampled.SourceDataLine;
 
+/// Streams the emulator's mixed PCM to the sound card. When a line is available its
+/// blocking {@link SourceDataLine#write} doubles as the emulation clock: the producer
+/// thread can only push samples as fast as the card plays them (32768 Hz), which paces
+/// the whole emulator to real time without any sleep-based timing.
 final class GbaAudioOutput implements AutoCloseable {
     private static final int SAMPLE_RATE = 32768;
-    private static final int SAMPLES_PER_PUMP = SAMPLE_RATE / 60;
     private static final int BYTES_PER_SAMPLE = 2;
+    // ~250 ms of slack so an occasional GC/scheduling hiccup does not starve the card.
+    private static final int LINE_BUFFER_SAMPLES = SAMPLE_RATE / 4;
+    // Upper bound on how many samples a single pump moves (normally ~one frame's worth).
+    private static final int MAX_DRAIN = SAMPLE_RATE / 8;
 
     private final GbaAudio audio;
     private final SourceDataLine line;
-    private final byte[] outputBuffer = new byte[SAMPLES_PER_PUMP * BYTES_PER_SAMPLE];
-    private byte lastOutputSample;
+    private final byte[] outputBuffer = new byte[MAX_DRAIN * BYTES_PER_SAMPLE];
 
     private GbaAudioOutput(GbaAudio audio, SourceDataLine line) {
         this.audio = audio;
@@ -26,7 +32,7 @@ final class GbaAudioOutput implements AutoCloseable {
         AudioFormat format = new AudioFormat(SAMPLE_RATE, 16, 1, true, false);
         try {
             SourceDataLine line = AudioSystem.getSourceDataLine(format);
-            line.open(format, SAMPLE_RATE * BYTES_PER_SAMPLE);
+            line.open(format, LINE_BUFFER_SAMPLES * BYTES_PER_SAMPLE);
             line.start();
             return new GbaAudioOutput(audio, line);
         } catch (LineUnavailableException | IllegalArgumentException exception) {
@@ -38,36 +44,33 @@ final class GbaAudioOutput implements AutoCloseable {
         return new GbaAudioOutput(audio, null);
     }
 
-    void pump() {
-        if (line == null) {
-            audio.drainPcm(SAMPLES_PER_PUMP);
-            return;
-        }
-        byte[] samples = audio.drainPcm(SAMPLES_PER_PUMP);
-        int sampleIndex = 0;
-        for (; sampleIndex < samples.length; sampleIndex++) {
-            lastOutputSample = samples[sampleIndex];
-            writePcm16(sampleIndex, lastOutputSample);
-        }
-        byte fillSample = audio.directSoundActive() ? lastOutputSample : 0;
-        for (; sampleIndex < SAMPLES_PER_PUMP; sampleIndex++) {
-            writePcm16(sampleIndex, fillSample);
-        }
-        line.write(outputBuffer, 0, outputBuffer.length);
+    /// True when a real sound line is driving playback, in which case {@link #pump()}
+    /// blocks and acts as the timing source. When false the caller must pace itself.
+    boolean isActive() {
+        return line != null;
     }
 
-    private void writePcm16(int sampleIndex, int sample) {
-        int value = sample << 8;
-        int offset = sampleIndex * BYTES_PER_SAMPLE;
-        outputBuffer[offset] = (byte) value;
-        outputBuffer[offset + 1] = (byte) (value >>> 8);
+    /// Drains every queued sample and writes it to the card. Blocks while the line
+    /// buffer is full, which is exactly what keeps the emulator at real time.
+    void pump() {
+        byte[] samples = audio.drainPcm(MAX_DRAIN);
+        if (line == null || samples.length == 0) {
+            return;
+        }
+        for (int i = 0; i < samples.length; i++) {
+            int value = samples[i] << 8;
+            outputBuffer[i * 2] = (byte) value;
+            outputBuffer[i * 2 + 1] = (byte) (value >>> 8);
+        }
+        line.write(outputBuffer, 0, samples.length * BYTES_PER_SAMPLE);
     }
 
     @Override
     public void close() {
         if (line != null) {
-            line.drain();
+            // stop + flush unblocks any thread parked in write() so it can exit.
             line.stop();
+            line.flush();
             line.close();
         }
     }
