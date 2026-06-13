@@ -1,6 +1,9 @@
 package dev.vitorsilverio.gbaemu.desktop;
 
 import dev.vitorsilverio.gbaemu.cartridge.GbaSaveFile;
+import dev.vitorsilverio.gbaemu.controller.CompositeController;
+import dev.vitorsilverio.gbaemu.controller.GamepadController;
+import dev.vitorsilverio.gbaemu.controller.KeyboardController;
 import dev.vitorsilverio.gbaemu.core.GbaConsole;
 
 import javax.swing.JFileChooser;
@@ -30,6 +33,11 @@ public final class GbaDesktopApp {
     private GbaEmulator activeEmulator;
     private File currentRom;
     private int gdbPort;
+    // Input is owned by the app (one keyboard + one gamepad poll thread) and shared across the
+    // ROMs the user loads; each emulator just borrows the composite to poll each frame.
+    private KeyboardController keyboardController;
+    private GamepadController gamepadController;
+    private CompositeController controller;
     private CpuDebugWindow cpuWindow;
     private PpuDebugWindow ppuWindow;
     private AudioDebugWindow audioWindow;
@@ -59,7 +67,10 @@ public final class GbaDesktopApp {
     public void launch(File initialRom, int gdbPort) {
         this.gdbPort = gdbPort;
         SwingUtilities.invokeLater(() -> {
-            window = new EmulatorWindow(menuActions(), settings);
+            keyboardController = new KeyboardController(settings);
+            gamepadController = new GamepadController(settings.gamepadConfig());
+            controller = new CompositeController(keyboardController, gamepadController);
+            window = new EmulatorWindow(menuActions(), settings, keyboardController);
             window.show();
             if (initialRom != null) {
                 startEmulator(initialRom);
@@ -77,6 +88,13 @@ public final class GbaDesktopApp {
                 this::resume,
                 this::restart,
                 this::stop,
+                this::saveState,
+                this::loadState,
+                this::saveStateToFile,
+                this::loadStateFromFile,
+                this::linkHost,
+                this::linkJoin,
+                this::linkDisconnect,
                 this::openSettings,
                 this::openCpuDebugger,
                 this::openPpuDebugger,
@@ -128,6 +146,7 @@ public final class GbaDesktopApp {
         stopActive();
         currentRom = romFile;
         activeEmulator = new GbaEmulator(console, saveFile, settings);
+        activeEmulator.setController(controller);
         if (gdbPort > 0) {
             activeEmulator.enableGdb(gdbPort);
         }
@@ -193,6 +212,117 @@ public final class GbaDesktopApp {
         }
     }
 
+    private void saveState() {
+        if (activeEmulator != null) {
+            activeEmulator.requestSaveState();
+        }
+    }
+
+    private void loadState() {
+        if (activeEmulator != null) {
+            activeEmulator.requestLoadState();
+        }
+    }
+
+    private void saveStateToFile() {
+        Path target = chooseStateFile(true);
+        if (target != null && activeEmulator != null) {
+            activeEmulator.requestSaveState(target);
+        }
+    }
+
+    private void loadStateFromFile() {
+        Path target = chooseStateFile(false);
+        if (target != null && activeEmulator != null) {
+            activeEmulator.requestLoadState(target);
+        }
+    }
+
+    /// Prompts for a `.ss` state file to write or read; returns null if the user cancels or
+    /// no ROM is running.
+    private Path chooseStateFile(boolean save) {
+        if (activeEmulator == null) {
+            JOptionPane.showMessageDialog(window.owner(),
+                    "Load a ROM before saving or loading a state.", "State", JOptionPane.INFORMATION_MESSAGE);
+            return null;
+        }
+        JFileChooser chooser = new JFileChooser(lastRomDirectory());
+        chooser.setDialogTitle(save ? "Save State to File" : "Load State from File");
+        chooser.setFileFilter(new FileNameExtensionFilter("gbaemu save states", "ss"));
+        int result = save
+                ? chooser.showSaveDialog(window.owner())
+                : chooser.showOpenDialog(window.owner());
+        if (result != JFileChooser.APPROVE_OPTION) {
+            return null;
+        }
+        return chooser.getSelectedFile().toPath();
+    }
+
+    private void linkHost() {
+        if (activeEmulator == null) {
+            needRomForLink();
+            return;
+        }
+        String input = JOptionPane.showInputDialog(window.owner(),
+                "Port to host the link on:", settings.multiplayerTcpPort());
+        if (input == null) {
+            return;
+        }
+        int port = parsePort(input, settings.multiplayerTcpPort());
+        settings = settings.withMultiplayer(settings.multiplayerTcpHost(), port, true).normalized();
+        DesktopAppSettingsStore.save(PREFERENCES, settings);
+        activeEmulator.requestHostLink(port);
+        JOptionPane.showMessageDialog(window.owner(),
+                "Hosting a link on port " + port + ".\n"
+                        + "Have the other instance Join this machine's address (127.0.0.1 if local).",
+                "Link", JOptionPane.INFORMATION_MESSAGE);
+    }
+
+    private void linkJoin() {
+        if (activeEmulator == null) {
+            needRomForLink();
+            return;
+        }
+        String input = JOptionPane.showInputDialog(window.owner(),
+                "Host to join (host:port):",
+                settings.multiplayerTcpHost() + ":" + settings.multiplayerTcpPort());
+        if (input == null || input.isBlank()) {
+            return;
+        }
+        String host = settings.multiplayerTcpHost();
+        int port = settings.multiplayerTcpPort();
+        String trimmed = input.trim();
+        int colon = trimmed.lastIndexOf(':');
+        if (colon > 0) {
+            host = trimmed.substring(0, colon).trim();
+            port = parsePort(trimmed.substring(colon + 1), port);
+        } else {
+            host = trimmed;
+        }
+        settings = settings.withMultiplayer(host, port, false).normalized();
+        DesktopAppSettingsStore.save(PREFERENCES, settings);
+        activeEmulator.requestJoinLink(host, port);
+    }
+
+    private void linkDisconnect() {
+        if (activeEmulator != null) {
+            activeEmulator.requestDisconnectLink();
+        }
+    }
+
+    private void needRomForLink() {
+        JOptionPane.showMessageDialog(window.owner(),
+                "Load a ROM before starting a link.", "Link", JOptionPane.INFORMATION_MESSAGE);
+    }
+
+    private static int parsePort(String text, int fallback) {
+        try {
+            return Math.max(1, Math.min(65535, Integer.parseInt(text.trim())));
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
+    }
+
     private void openSettings() {
         new SettingsDialog(window.owner(), settings, this::applySettings).setVisible(true);
     }
@@ -201,6 +331,8 @@ public final class GbaDesktopApp {
         settings = updated.normalized();
         DesktopAppSettingsStore.save(PREFERENCES, settings);
         window.applySettings(settings);
+        keyboardController.applySettings(settings);
+        gamepadController.applySettings(settings.gamepadConfig());
         if (activeEmulator != null) {
             activeEmulator.applyAudioSettings(settings);
             activeEmulator.console().setScanlineRenderingEnabled(settings.scanlineRendering());

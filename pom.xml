@@ -17,6 +17,14 @@
             <version>1.0</version>
         </dependency>
         <dependency>
+            <!-- Optional gamepad support, used entirely via reflection (GamepadController),
+                 so the emulator still compiles and runs if this jar is absent at runtime. -->
+            <groupId>de.gurkenlabs</groupId>
+            <artifactId>input4j</artifactId>
+            <version>1.2.0</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
             <version>${junit.version}</version>

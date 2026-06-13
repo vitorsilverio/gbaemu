@@ -1,7 +1,7 @@
 package dev.vitorsilverio.gbaemu.desktop;
 
+import dev.vitorsilverio.gbaemu.controller.KeyboardController;
 import dev.vitorsilverio.gbaemu.core.GbaConsole;
-import dev.vitorsilverio.gbaemu.input.GbaButton;
 
 import javax.swing.JFrame;
 import javax.swing.JMenu;
@@ -33,14 +33,16 @@ public final class EmulatorWindow {
 
     private final JFrame frame = new JFrame("gbaemu");
     private final EmulatorMenuActions actions;
+    private final KeyboardController keyboard;
     private GbaFramePanel panel;
     private int scale;
     private volatile GbaEmulator emulator;
 
     private final Timer renderTimer = new Timer(RENDER_INTERVAL_MS, event -> renderTick());
 
-    public EmulatorWindow(EmulatorMenuActions actions, AppSettings settings) {
+    public EmulatorWindow(EmulatorMenuActions actions, AppSettings settings, KeyboardController keyboard) {
         this.actions = actions;
+        this.keyboard = keyboard;
         this.scale = settings.scale();
         this.panel = new GbaFramePanel(scale);
         frame.setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
@@ -115,16 +117,48 @@ public final class EmulatorWindow {
         }
         GbaConsole console = active.console();
         String state = active.isPaused() ? "paused" : (active.isRunning() ? "running" : "stopped");
+        String link = active.linkActive() ? " - link: " + active.linkStatus() : "";
         return "gbaemu - " + state
                 + " - PC=0x" + Integer.toHexString(console.cpu().programCounter())
-                + " VCOUNT=" + console.lcdTiming().scanline();
+                + " VCOUNT=" + console.lcdTiming().scanline()
+                + link;
     }
 
     private JMenuBar buildMenuBar() {
         JMenuBar menuBar = new JMenuBar();
         menuBar.add(buildEmulatorMenu());
+        menuBar.add(buildStateMenu());
+        menuBar.add(buildLinkMenu());
         menuBar.add(buildDebugMenu());
         return menuBar;
+    }
+
+    /// Multiplayer link-cable session control (serial over TCP between two instances).
+    private JMenu buildLinkMenu() {
+        JMenu menu = new JMenu("Link");
+        menu.add(plainItem("Host (TCP)...", actions.linkHost()));
+        menu.add(plainItem("Join (TCP)...", actions.linkJoin()));
+        menu.addSeparator();
+        menu.add(plainItem("Disconnect", actions.linkDisconnect()));
+        return menu;
+    }
+
+    /// Quick save/load of the full machine state plus arbitrary-file variants. F5/F8 are the
+    /// accelerators (the single hotkey path — see {@link #installKeyListener}).
+    private JMenu buildStateMenu() {
+        JMenu menu = new JMenu("State");
+        JMenuItem save = new JMenuItem("Save State");
+        save.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_F5, 0));
+        save.addActionListener(event -> actions.saveState().run());
+        menu.add(save);
+        JMenuItem load = new JMenuItem("Load State");
+        load.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_F8, 0));
+        load.addActionListener(event -> actions.loadState().run());
+        menu.add(load);
+        menu.addSeparator();
+        menu.add(plainItem("Save State to File...", actions.saveStateToFile()));
+        menu.add(plainItem("Load State from File...", actions.loadStateFromFile()));
+        return menu;
     }
 
     private JMenu buildEmulatorMenu() {
@@ -232,52 +266,13 @@ public final class EmulatorWindow {
             if (active != frame) {
                 return false;
             }
-            if (id == KeyEvent.KEY_PRESSED && handleStateHotkey(event.getKeyCode())) {
-                return false;
+            // Feed the configured keyboard controller; the emulation thread reads its state each
+            // frame (see GbaEmulator#pollInput). Consume bound keys so the arrows/Enter don't also
+            // drive Swing's focus traversal or menu mnemonics.
+            if (keyboard.setKey(event.getKeyCode(), id == KeyEvent.KEY_PRESSED)) {
+                event.consume();
             }
-            setButton(event, id == KeyEvent.KEY_PRESSED);
             return false;
         });
-    }
-
-    /// F5 = quick save state, F8 = quick load state. Returns true if the key was handled.
-    private boolean handleStateHotkey(int keyCode) {
-        GbaEmulator active = emulator;
-        if (active == null) {
-            return false;
-        }
-        if (keyCode == KeyEvent.VK_F5) {
-            active.requestSaveState();
-            return true;
-        }
-        if (keyCode == KeyEvent.VK_F8) {
-            active.requestLoadState();
-            return true;
-        }
-        return false;
-    }
-
-    private void setButton(KeyEvent event, boolean pressed) {
-        GbaEmulator active = emulator;
-        if (active == null) {
-            return;
-        }
-        GbaButton button = switch (event.getKeyCode()) {
-            case KeyEvent.VK_X -> GbaButton.A;
-            case KeyEvent.VK_Z -> GbaButton.B;
-            case KeyEvent.VK_ENTER -> GbaButton.START;
-            case KeyEvent.VK_SHIFT -> GbaButton.SELECT;
-            case KeyEvent.VK_RIGHT -> GbaButton.RIGHT;
-            case KeyEvent.VK_LEFT -> GbaButton.LEFT;
-            case KeyEvent.VK_UP -> GbaButton.UP;
-            case KeyEvent.VK_DOWN -> GbaButton.DOWN;
-            case KeyEvent.VK_A -> GbaButton.L;
-            case KeyEvent.VK_S -> GbaButton.R;
-            default -> null;
-        };
-        if (button != null) {
-            active.console().keypad().setPressed(button, pressed);
-            event.consume();
-        }
     }
 }

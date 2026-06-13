@@ -24,6 +24,7 @@ import dev.vitorsilverio.gbaemu.memory.GbaBios;
 import dev.vitorsilverio.gbaemu.memory.GbaBus;
 import dev.vitorsilverio.gbaemu.memory.GbaEwram;
 import dev.vitorsilverio.gbaemu.memory.GbaIwram;
+import dev.vitorsilverio.gbaemu.serial.GbaSerial;
 import dev.vitorsilverio.gbaemu.system.GbaSystemControl;
 import dev.vitorsilverio.gbaemu.timer.GbaTimerController;
 import dev.vitorsilverio.gbaemu.video.GbaLcdTiming;
@@ -56,6 +57,7 @@ public final class GbaConsole {
     private final GbaCartridge cartridge;
     private final GbaSystemControl systemControl;
     private final GbaAudio audio;
+    private final GbaSerial serial;
 
     private GbaConsole(
             GbaBus bus,
@@ -69,7 +71,8 @@ public final class GbaConsole {
             GbaKeypad keypad,
             GbaCartridge cartridge,
             GbaSystemControl systemControl,
-            GbaAudio audio) {
+            GbaAudio audio,
+            GbaSerial serial) {
         this.bus = Objects.requireNonNull(bus, "bus");
         this.cpu = Objects.requireNonNull(cpu, "cpu");
         this.runtime = Objects.requireNonNull(runtime, "runtime");
@@ -82,6 +85,7 @@ public final class GbaConsole {
         this.cartridge = Objects.requireNonNull(cartridge, "cartridge");
         this.systemControl = Objects.requireNonNull(systemControl, "systemControl");
         this.audio = Objects.requireNonNull(audio, "audio");
+        this.serial = Objects.requireNonNull(serial, "serial");
     }
 
     public static GbaConsole fromRom(byte[] rom) {
@@ -150,8 +154,11 @@ public final class GbaConsole {
 
     public GbaSystemControl systemControl() { return systemControl; }
 
+    public GbaSerial serial() { return serial; }
+
     private static final int SAVE_STATE_MAGIC = 0x47424153; // "GBAS"
-    private static final int SAVE_STATE_VERSION = 1;
+    // v2 added the serial peripheral block; older states are rejected rather than misread.
+    private static final int SAVE_STATE_VERSION = 2;
 
     /// Writes a full machine snapshot — CPU, all writable RAM (EWRAM/IWRAM/palette/VRAM/OAM),
     /// every I/O peripheral and the cartridge save — to `path`. The BIOS and ROM are static
@@ -174,6 +181,7 @@ public final class GbaConsole {
             lcdTiming.saveState(out);
             audio.saveState(out);
             keypad.saveState(out);
+            serial.saveState(out);
             byte[] cartridgeSave = backup().snapshot();
             out.writeInt(cartridgeSave.length);
             out.write(cartridgeSave);
@@ -205,6 +213,7 @@ public final class GbaConsole {
             lcdTiming.loadState(in);
             audio.loadState(in);
             keypad.loadState(in);
+            serial.loadState(in);
             backup().load(in.readNBytes(in.readInt()));
             runtime.blockCache().clear();
             updateInterruptLine();
@@ -317,6 +326,7 @@ public final class GbaConsole {
         GbaTimerController timers          = new GbaTimerController(interrupts);
         GbaKeypad keypad                   = new GbaKeypad(interrupts);
         GbaSystemControl systemControl     = new GbaSystemControl();
+        GbaSerial serial                   = new GbaSerial(interrupts);
         GbaSaveMemory saveMemory           = GbaSaveMemory.forType(cartridge.saveType());
         GbaRom gbRom                       = new GbaRom(rom);
 
@@ -330,6 +340,7 @@ public final class GbaConsole {
         bus.add(dma);               // 0x040000B0-0x040000DF  (DMA registers)
         bus.add(timers);            // 0x04000100-0x0400010F  (Timer registers)
         bus.add(keypad);            // 0x04000130-0x04000133  (Keypad registers)
+        bus.add(serial);            // 0x04000120-0x0400012F, 0x04000134  (SIO + RCNT)
         bus.add(interrupts);        // 0x04000200-0x04000209  (IE/IF/IME)
         bus.add(systemControl);     // 0x04000204, 0x04000300-0x04000301
         bus.add(new GbaEwram());    // 0x02000000-0x02FFFFFF
@@ -358,7 +369,7 @@ public final class GbaConsole {
         JitRuntime runtime = createRuntime();
         ArmCore cpu = createCpu(new InvalidationAwareAddressSpace(bus, runtime), swiDispatcher, entryPoint);
         return new GbaConsole(bus, cpu, runtime, new GbaVideo(),
-                lcdTiming, dma, interrupts, timers, keypad, cartridge, systemControl, audio);
+                lcdTiming, dma, interrupts, timers, keypad, cartridge, systemControl, audio, serial);
     }
 
     private static ArmCore createCpu(AddressSpace bus, SwiDispatcher swiDispatcher, int entryPoint) {
@@ -397,6 +408,7 @@ public final class GbaConsole {
     }
 
     private void tickHardware(int cycles) {
+        serial.tick(cycles);
         dma.triggerImmediateTransfers();
         int timerOverflows = timers.tick(cycles);
         dma.triggerAudioFifoTransfers(audio.timerOverflow(
