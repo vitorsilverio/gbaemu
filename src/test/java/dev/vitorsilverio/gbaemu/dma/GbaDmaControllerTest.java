@@ -51,6 +51,20 @@ class GbaDmaControllerTest {
     }
 
     @Test
+    void wordTransferForcesSourceAndDestinationAlignment() {
+        Ctx ctx = createCtx();
+        ctx.bus.write32(0x02000000, 0xAABBCCDD); // aligned word at the real source
+        // Odd source (0x02000001) + unaligned dest (0x03000002), 32-bit, 1 word, immediate.
+        // The GBA DMA must align both down — Metroid Fusion passes a THUMB routine's odd
+        // address as a 32-bit DMA source and relies on this (else the copy is byte-shifted).
+        setupDma(ctx.dma, 3, 0x02000001, 0x03000002, 1, (1 << 15) | (1 << 10));
+
+        ctx.dma.triggerImmediateTransfers();
+
+        assertEquals(0xAABBCCDD, ctx.bus.read32(0x03000000));
+    }
+
+    @Test
     void immediateWordTransferCopiesToPaletteRam() {
         Ctx ctx = createCtx();
         ctx.bus.write32(0x02000000, 0x03E0001F);
@@ -109,6 +123,29 @@ class GbaDmaControllerTest {
         assertEquals(0xCAFE, ctx.bus.read16(0x03000000));
         assertEquals(0x02000000, ctx.dma.readWord(0x040000B0));
         assertEquals(0x03000000, ctx.dma.readWord(0x040000B4));
+    }
+
+    @Test
+    void backToBackImmediateFillsOnSameChannelBothRun() {
+        // MainMenuGpuInit arms three immediate DMA fills on channel 3 back-to-back (VRAM, then
+        // OAM, then PLTT) within a single straight-line code block. Each must run the instant it
+        // is enabled, before the next arm overwrites the channel registers. If immediate DMAs were
+        // deferred to a single per-block triggerImmediateTransfers(), only the last config would
+        // run and the earlier fills (the VRAM clear) would be silently dropped -- which left the
+        // stale green title tiles on the Oak-intro background.
+        Ctx ctx = createCtx();
+        ctx.bus.write16(0x02000000, 0xABCD); // fixed fill source
+
+        // First immediate fill -> region A
+        setupDma(ctx.dma, 3, 0x02000000, 0x02001000, 1, (1 << 15) | (2 << 7)); // enable, src fixed
+        // Second immediate fill -> region B, reusing (clobbering) channel 3's registers
+        setupDma(ctx.dma, 3, 0x02000000, 0x02002000, 1, (1 << 15) | (2 << 7));
+
+        // The per-block hardware tick happens only now -- both fills must already have run at arm time.
+        ctx.dma.triggerImmediateTransfers();
+
+        assertEquals(0xABCD, ctx.bus.read16(0x02001000)); // would be 0 if the first fill were dropped
+        assertEquals(0xABCD, ctx.bus.read16(0x02002000));
     }
 
     @Test

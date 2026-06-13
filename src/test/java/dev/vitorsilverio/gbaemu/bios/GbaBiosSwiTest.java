@@ -52,6 +52,72 @@ class GbaBiosSwiTest {
     }
 
     @Test
+    void vblankIntrWaitHaltsForVblankAndRewindsToReexecuteTheSwi() {
+        GbaSystemControl system = new GbaSystemControl();
+        SwiDispatcher dispatcher = GbaBiosSwi.dispatcher(createBus(), system);
+
+        // PC has already been advanced past the SWI by the dispatcher (here SWI at 0x08000000).
+        CpuState result = dispatcher.dispatch(0x05, new CpuState(0, 0, 0, 0, 0, 0, 0x08000004, 0));
+
+        assertTrue(system.halted());
+        assertEquals(0x0001, system.intrWaitMask());   // returns to the game only on VBlank
+        assertEquals(0x08000000, result.pc());          // rewound onto the SWI so it re-executes
+    }
+
+    @Test
+    void vblankIntrWaitReturnsToCallerOnceVblankHasFired() {
+        GbaSystemControl system = new GbaSystemControl();
+        SwiDispatcher dispatcher = GbaBiosSwi.dispatcher(createBus(), system);
+
+        dispatcher.dispatch(0x05, new CpuState(0, 0, 0, 0, 0, 0, 0x08000004, 0)); // begins the wait
+        system.markIntrWaitSatisfied(); // advanceHalted sets this when VBlank actually fires
+
+        CpuState result = dispatcher.dispatch(0x05, new CpuState(0, 0, 0, 0, 0, 0, 0x08000004, 0));
+
+        assertEquals(0x08000004, result.pc()); // continues past the SWI: returns to the caller
+        assertEquals(0, system.intrWaitMask()); // wait ended
+    }
+
+    @Test
+    void intrWaitWaitsForTheRequestedInterruptMask() {
+        GbaSystemControl system = new GbaSystemControl();
+        SwiDispatcher dispatcher = GbaBiosSwi.dispatcher(createBus(), system);
+
+        // r0 = discard old flags, r1 = interrupt mask to wait for (here Timer3 = bit 6).
+        dispatcher.dispatch(0x04, new CpuState(1, 0x40, 0, 0, 0, 0, 0x08000004, 0));
+
+        assertTrue(system.halted());
+        assertEquals(0x40, system.intrWaitMask());
+    }
+
+    @Test
+    void plainHaltWakesOnAnyInterrupt() {
+        GbaSystemControl system = new GbaSystemControl();
+        SwiDispatcher dispatcher = GbaBiosSwi.dispatcher(createBus(), system);
+
+        dispatcher.dispatch(0x02, state(0));
+
+        assertTrue(system.halted());
+        assertEquals(0, system.intrWaitMask()); // 0 = plain HALT, wakes on any enabled interrupt
+    }
+
+    @Test
+    void midiKey2FreqScalesWaveFrequencyByMidiKey() {
+        var bus = createBus();
+        bus.write32(0x02000004, 4096); // WaveData.freq lives at [r0 + 4]; r0 = 0x02000000
+
+        SwiDispatcher dispatcher = GbaBiosSwi.dispatcher(bus, new GbaSystemControl());
+
+        // key 180, fine 0 -> divisor 2^0 = 1 -> frequency unchanged (the old stub returned 0).
+        CpuState same = dispatcher.dispatch(0x1F, new CpuState(0x02000000, 180, 0, 0, 0, 0, 0, 0));
+        assertEquals(4096, same.r0());
+
+        // key 168 = 12 semitones lower -> divisor 2 -> one octave down.
+        CpuState octaveDown = dispatcher.dispatch(0x1F, new CpuState(0x02000000, 168, 0, 0, 0, 0, 0, 0));
+        assertEquals(2048, octaveDown.r0());
+    }
+
+    @Test
     void divReturnsQuotientRemainderAndAbsQuotient() {
         SwiDispatcher dispatcher = GbaBiosSwi.dispatcher(createBus(), new GbaSystemControl());
 
@@ -140,12 +206,34 @@ class GbaBiosSwiTest {
         bus.write16(0x02000000, 0x0100);
         bus.write16(0x02000002, 0x0100);
 
+        // offset=8 bytes (OAM layout): PA/PB/PC/PD must land 8 bytes apart, matching the
+        // OAM matrix slots (0x06/0x0E/0x16/0x1E within a 32-byte group). An identity
+        // src (scale 1.0, angle 0) yields PA=PD=0x100, PB=PC=0.
         dispatcher.dispatch(0x0F, new CpuState(0x02000000, 0x03000000, 1, 8, 0, 0, 0, 0));
 
-        assertEquals(0x0100, bus.read16(0x03000000));
-        assertEquals(0, bus.read16(0x03000010));
-        assertEquals(0, bus.read16(0x03000020));
-        assertEquals(0x0100, bus.read16(0x03000030));
+        assertEquals(0x0100, bus.read16(0x03000000)); // PA
+        assertEquals(0, bus.read16(0x03000008));      // PB
+        assertEquals(0, bus.read16(0x03000010));      // PC
+        assertEquals(0x0100, bus.read16(0x03000018)); // PD
+    }
+
+    @Test
+    void objAffineSetWritesConsecutiveMatricesContiguouslyWithOffsetTwo() {
+        GbaBus bus = createBus();
+        SwiDispatcher dispatcher = GbaBiosSwi.dispatcher(bus, new GbaSystemControl());
+        // Two identity sources (scaleX, scaleY, angle = 0x100, 0x100, 0), 6 bytes each.
+        bus.write16(0x02000000, 0x0100);
+        bus.write16(0x02000002, 0x0100);
+        bus.write16(0x02000006, 0x0100);
+        bus.write16(0x02000008, 0x0100);
+
+        dispatcher.dispatch(0x0F, new CpuState(0x02000000, 0x03000000, 2, 2, 0, 0, 0, 0));
+
+        // offset=2 packs PA/PB/PC/PD as consecutive halfwords; the 2nd matrix follows.
+        assertEquals(0x0100, bus.read16(0x03000000)); // matrix0 PA
+        assertEquals(0x0100, bus.read16(0x03000006)); // matrix0 PD
+        assertEquals(0x0100, bus.read16(0x03000008)); // matrix1 PA
+        assertEquals(0x0100, bus.read16(0x0300000E)); // matrix1 PD
     }
 
     @Test
@@ -323,13 +411,14 @@ class GbaBiosSwiTest {
     }
 
     @Test
-    void unknownSwiThrowsUsefulError() {
+    void unknownSwiIsIgnoredInsteadOfCrashing() {
         SwiDispatcher dispatcher = GbaBiosSwi.dispatcher(createBus(), new GbaSystemControl());
 
-        UnsupportedOperationException exception = assertThrows(
-                UnsupportedOperationException.class,
-                () -> dispatcher.dispatch(0x2B, state(0)));
-        assertTrue(exception.getMessage().contains("0x2b"));
+        CpuState input = state(0x1234);
+        // A genuinely unknown SWI (or a game that has jumped into garbage) must never crash the
+        // emulator; it is treated as a no-op that returns the CPU state unchanged.
+        CpuState result = assertDoesNotThrow(() -> dispatcher.dispatch(0x2B, input));
+        assertEquals(0x1234, result.r0());
     }
 
     private static CpuState state(int r0) {

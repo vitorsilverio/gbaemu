@@ -4,6 +4,8 @@ import dev.vitorsilverio.gbaemu.core.MemorySpace;
 import dev.vitorsilverio.gbaemu.interrupt.GbaInterrupt;
 import dev.vitorsilverio.gbaemu.interrupt.GbaInterruptController;
 
+import java.util.function.IntConsumer;
+
 /// Registradores LCD e temporizador do LCD do GBA.
 ///
 /// Possui todos os registradores de IO LCD (0x04000000-0x0400005F):
@@ -19,6 +21,12 @@ public final class GbaLcdTiming implements MemorySpace {
 
     private static final int DISPSTAT     = 0x04000004;
     private static final int VCOUNT       = 0x04000006;
+    // Affine BG matrix registers (write-only on hardware); reset to identity below.
+    private static final int BG2PA        = 0x04000020;
+    private static final int BG2PD        = 0x04000026;
+    private static final int BG3PA        = 0x04000030;
+    private static final int BG3PD        = 0x04000036;
+    private static final int AFFINE_IDENTITY = 0x0100; // 1.0 in 8.8 fixed point
     private static final int VBLANK_FLAG  = 1;
     private static final int HBLANK_FLAG  = 1 << 1;
     private static final int VCOUNT_FLAG  = 1 << 2;
@@ -29,6 +37,12 @@ public final class GbaLcdTiming implements MemorySpace {
 
     private final byte[] registers = new byte[REGISTERS_SIZE];
     private final GbaInterruptController interrupts;
+
+    // Optional per-visible-scanline render hook, invoked at the start of each visible
+    // line's HBlank with that line number. Lets the PPU render each line with the register
+    // state at that moment (per-scanline affine/scroll/priority effects). Off by default
+    // so headless/test callers (which render whole frames at the end) pay nothing.
+    private IntConsumer scanlineRenderer;
 
     private int scanline;
     private int scanlineCycles;
@@ -53,6 +67,14 @@ public final class GbaLcdTiming implements MemorySpace {
 
     public GbaLcdTiming(GbaInterruptController interrupts) {
         this.interrupts = interrupts;
+        // Affine BG matrices reset to identity (PA=PD=1.0), matching hardware/mGBA, so an
+        // affine BG enabled without an explicit matrix still renders 1:1 instead of
+        // collapsing to a single texel — e.g. FireRed's intro BG2 portraits (Oak/Nidoran/
+        // gender characters), which rely on the default identity and never write the matrix.
+        rawWrite16(BG2PA, AFFINE_IDENTITY);
+        rawWrite16(BG2PD, AFFINE_IDENTITY);
+        rawWrite16(BG3PA, AFFINE_IDENTITY);
+        rawWrite16(BG3PD, AFFINE_IDENTITY);
         updateRegisters();
     }
 
@@ -82,6 +104,30 @@ public final class GbaLcdTiming implements MemorySpace {
     public int scanline() { return scanline; }
 
     public int scanlineCycles() { return scanlineCycles; }
+
+    public void setScanlineRenderer(IntConsumer scanlineRenderer) {
+        this.scanlineRenderer = scanlineRenderer;
+    }
+
+    /// Serializes the LCD registers and scanline timing into a save state.
+    public void saveState(java.io.DataOutputStream out) throws java.io.IOException {
+        out.write(registers);
+        out.writeInt(scanline);
+        out.writeInt(scanlineCycles);
+        out.writeBoolean(vblank);
+        out.writeBoolean(hblank);
+        out.writeBoolean(vcountMatch);
+    }
+
+    /// Restores the LCD registers and scanline timing from a save state.
+    public void loadState(java.io.DataInputStream in) throws java.io.IOException {
+        in.readFully(registers);
+        scanline = in.readInt();
+        scanlineCycles = in.readInt();
+        vblank = in.readBoolean();
+        hblank = in.readBoolean();
+        vcountMatch = in.readBoolean();
+    }
 
     public Events tick(int cycles) {
         if (cycles < 0) throw new IllegalArgumentException("cycles must be >= 0");
@@ -130,6 +176,12 @@ public final class GbaLcdTiming implements MemorySpace {
 
         rawWrite16(DISPSTAT, dispstat);
         rawWrite16(VCOUNT, scanline);
+
+        // Draw the line at the start of its HBlank, before the game's HBlank handler runs
+        // and reprograms registers for the next line — so this line gets its own state.
+        if (scanlineRenderer != null && events.hblankStarted() && scanline < VISIBLE_SCANLINES) {
+            scanlineRenderer.accept(scanline);
+        }
         return events;
     }
 

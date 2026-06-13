@@ -6,7 +6,7 @@ import dev.vitorsilverio.gbaemu.memory.GbaMemoryRegion;
 import java.util.Arrays;
 
 /// Memoria persistente inicial de cartucho.
-public final class GbaSaveMemory implements MemorySpace {
+public final class GbaSaveMemory implements MemorySpace, CartridgeBackup {
     public static final int SRAM_SIZE = 64 * 1024;
     public static final int FLASH_1M_SIZE = 128 * 1024;
     private static final int FLASH_BANK_SIZE = 64 * 1024;
@@ -95,6 +95,11 @@ public final class GbaSaveMemory implements MemorySpace {
     public void load(byte[] snapshot) {
         Arrays.fill(data, (byte) 0xFF);
         System.arraycopy(snapshot, 0, data, 0, Math.min(snapshot.length, data.length));
+    }
+
+    @Override
+    public boolean isPersistable() {
+        return type != GbaSaveType.NONE && data.length > 0;
     }
 
     private boolean isFlash() {

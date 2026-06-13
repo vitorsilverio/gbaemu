@@ -1,13 +1,16 @@
 package dev.vitorsilverio.gbaemu;
 
+import dev.vitorsilverio.gbaemu.cartridge.GbaSaveFile;
 import dev.vitorsilverio.gbaemu.core.GbaConsole;
 import dev.vitorsilverio.gbaemu.core.GbaCpuTraceLogger;
 import dev.vitorsilverio.gbaemu.bios.GbaBiosSwi;
-import dev.vitorsilverio.gbaemu.desktop.GbaSwingWindow;
+import dev.vitorsilverio.gbaemu.desktop.GbaDesktopApp;
+import dev.vitorsilverio.gbaemu.desktop.GbaEmulator;
 import dev.vitorsilverio.gbaemu.video.GbaVideo;
 import dev.vitorsilverio.gbaemu.video.GbaVideoFrameStats;
 import dev.vitorsilverio.gbaemu.video.PpmFrameWriter;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -23,15 +26,34 @@ public final class Main {
             return;
         }
 
+        // GUI mode: open the windowed app whenever the user is not running a headless
+        // batch (no ROM given, or --window requested). The GUI loads ROMs itself and
+        // takes its boot/BIOS/audio settings from the Settings dialog, not the CLI.
+        if (options.window() || options.rom() == null || options.gdbPort() > 0) {
+            new GbaDesktopApp().launch(
+                    options.rom() == null ? null : options.rom().toFile(), options.gdbPort());
+            return;
+        }
+
         byte[] rom = Files.readAllBytes(options.rom());
         GbaConsole console;
         if (options.bios() == null) {
             console = GbaConsole.fromRom(rom);
+        } else if (options.realSwi()) {
+            console = GbaConsole.fromBiosAndRomRealSwi(Files.readAllBytes(options.bios()), rom);
         } else if (options.realBios()) {
             console = GbaConsole.fromBiosAndRom(Files.readAllBytes(options.bios()), rom);
         } else {
             console = GbaConsole.fromBiosAndRomHle(Files.readAllBytes(options.bios()), rom);
         }
+
+        GbaSaveFile saveFile = new GbaSaveFile(options.rom(), console.backup());
+        if (saveFile.load()) {
+            System.out.println("Save carregado de " + saveFile.path());
+        } else if (saveFile.isPersistable()) {
+            System.out.println("Sem save previo; sera gravado em " + saveFile.path());
+        }
+
         GbaCpuTraceLogger cpuTrace = new GbaCpuTraceLogger(
                 System.out,
                 options.traceCpuInstructions(),
@@ -56,6 +78,7 @@ public final class Main {
 
         if (options.frameCount() > 1) {
             writeFrameSequence(console, options);
+            flushSave(saveFile);
             return;
         }
 
@@ -75,15 +98,18 @@ public final class Main {
         if (options.debugSwi()) {
             printSwiCounts();
         }
-        if (options.window()) {
-            System.out.println("Abrindo janela Swing. Feche a janela para encerrar o processo.");
-            GbaSwingWindow.open(
-                    console,
-                    options.scale(),
-                    options.stepsPerFrame(),
-                    options.cyclesPerFrame(),
-                    options.debugVideo(),
-                    options.muteAudio());
+        flushSave(saveFile);
+    }
+
+    /// Writes the cartridge save to disk if it changed, logging the outcome. Swallows
+    /// I/O errors so a transient disk problem never crashes the emulator.
+    private static void flushSave(GbaSaveFile saveFile) {
+        try {
+            if (saveFile.flush()) {
+                System.out.println("Save gravado em " + saveFile.path());
+            }
+        } catch (IOException exception) {
+            System.err.println("Falha ao gravar o save em " + saveFile.path() + ": " + exception.getMessage());
         }
     }
 
@@ -260,6 +286,7 @@ public final class Main {
             Path frame,
             boolean window,
             boolean realBios,
+            boolean realSwi,
             int scale,
             int stepsPerFrame,
             int cyclesPerFrame,
@@ -271,7 +298,8 @@ public final class Main {
             int traceCpuTailInstructions,
             int frameCount,
             int frameStep,
-            int frameStepCycles) {
+            int frameStepCycles,
+            int gdbPort) {
         private static CliOptions parse(String[] args) {
             Path rom = null;
             Path bios = null;
@@ -282,9 +310,10 @@ public final class Main {
             int postSteps = 0;
             boolean window = false;
             boolean realBios = false;
+            boolean realSwi = false;
             int scale = 3;
             int stepsPerFrame = 0;
-            int cyclesPerFrame = GbaSwingWindow.DEFAULT_CYCLES_PER_FRAME;
+            int cyclesPerFrame = GbaEmulator.DEFAULT_CYCLES_PER_FRAME;
             boolean debugVideo = false;
             boolean debugState = false;
             boolean debugSwi = false;
@@ -294,6 +323,7 @@ public final class Main {
             int frameCount = 1;
             int frameStep = 0;
             int frameStepCycles = 0;
+            int gdbPort = 0;
 
             for (int i = 0; i < args.length; i++) {
                 String arg = args[i];
@@ -308,6 +338,7 @@ public final class Main {
                     case "--no-frame" -> frame = null;
                     case "--window" -> window = true;
                     case "--real-bios" -> realBios = true;
+                    case "--real-swi" -> realSwi = true;
                     case "--scale" -> scale = Integer.parseInt(value(args, ++i, arg));
                     case "--steps-per-frame" -> stepsPerFrame = Integer.parseInt(value(args, ++i, arg));
                     case "--cycles-per-frame" -> cyclesPerFrame = Integer.parseInt(value(args, ++i, arg));
@@ -320,6 +351,7 @@ public final class Main {
                     case "--frame-count" -> frameCount = Integer.parseInt(value(args, ++i, arg));
                     case "--frame-step" -> frameStep = Integer.parseInt(value(args, ++i, arg));
                     case "--frame-step-cycles" -> frameStepCycles = Integer.parseInt(value(args, ++i, arg));
+                    case "--gdb" -> gdbPort = 2345;
                     case "--help", "-h" -> {
                         return null;
                     }
@@ -327,9 +359,8 @@ public final class Main {
                 }
             }
 
-            if (rom == null) {
-                return null;
-            }
+            // A null ROM is allowed: Main then launches the GUI (browse for a ROM there).
+            // Only --help returns null (to print usage).
             return new CliOptions(
                     rom,
                     bios,
@@ -340,6 +371,7 @@ public final class Main {
                     frame,
                     window,
                     realBios,
+                    realSwi,
                     scale,
                     stepsPerFrame,
                     cyclesPerFrame,
@@ -351,7 +383,8 @@ public final class Main {
                     traceCpuTailInstructions,
                     frameCount,
                     frameStep,
-                    frameStepCycles);
+                    frameStepCycles,
+                    gdbPort);
         }
 
         private static String value(String[] args, int index, String option) {

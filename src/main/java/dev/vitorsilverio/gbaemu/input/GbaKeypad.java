@@ -76,6 +76,17 @@ public final class GbaKeypad implements MemorySpace {
         return pressedMask;
     }
 
+    /// Serializes KEYCNT into a save state. The pressed buttons (KEYINPUT) are live input,
+    /// not part of the snapshot, so reloading keeps whatever the player is currently holding.
+    public void saveState(java.io.DataOutputStream out) throws java.io.IOException {
+        out.writeInt(keycnt);
+    }
+
+    /// Restores KEYCNT from a save state.
+    public void loadState(java.io.DataInputStream in) throws java.io.IOException {
+        keycnt = in.readInt();
+    }
+
     private void requestInterruptIfNeeded() {
         if (interrupts == null || (keycnt & IRQ_ENABLE) == 0) return;
         int selected = keycnt & KEY_MASK;

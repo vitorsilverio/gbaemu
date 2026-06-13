@@ -12,6 +12,12 @@ public final class GbaSystemControl implements MemorySpace {
     private int waitcnt;
     private boolean halted;
     private boolean stopped;
+    /// IntrWait/VBlankIntrWait state: `intrWaitMask` = interrupts the wait returns on (0 =
+    /// plain HALT, no specific wait); `intrWaitSatisfied` = one of them has fired since the
+    /// wait began. The CPU still wakes on ANY interrupt to service unrelated handlers; the
+    /// wait only returns to the game once `intrWaitSatisfied` is set.
+    private int intrWaitMask;
+    private boolean intrWaitSatisfied;
 
     @Override
     public boolean contains(int address) {
@@ -57,10 +63,39 @@ public final class GbaSystemControl implements MemorySpace {
         if ((value & 0x80) == 0) {
             halted = true;
             stopped = false;
+            intrWaitMask = 0; // plain HALT: wake on any enabled interrupt
+            intrWaitSatisfied = false;
         } else {
             halted = false;
             stopped = true;
         }
+    }
+
+    /// Begin (or re-arm) an IntrWait/VBlankIntrWait halt that returns only once one of the
+    /// interrupts in `mask` has fired. Re-armed on each wake while still waiting.
+    public void beginIntrWait(int mask) {
+        halted = true;
+        stopped = false;
+        intrWaitMask = mask;
+        intrWaitSatisfied = false;
+    }
+
+    /// Interrupts the current IntrWait is waiting to return on (0 = plain HALT / not waiting).
+    public int intrWaitMask() {
+        return intrWaitMask;
+    }
+
+    public boolean intrWaitSatisfied() {
+        return intrWaitSatisfied;
+    }
+
+    public void markIntrWaitSatisfied() {
+        intrWaitSatisfied = true;
+    }
+
+    public void endIntrWait() {
+        intrWaitMask = 0;
+        intrWaitSatisfied = false;
     }
 
     public boolean halted() {
@@ -74,5 +109,25 @@ public final class GbaSystemControl implements MemorySpace {
     public void resume() {
         halted = false;
         stopped = false;
+    }
+
+    /// Serializes the system-control state (POSTFLG/WAITCNT + halt/intr-wait) into a save state.
+    public void saveState(java.io.DataOutputStream out) throws java.io.IOException {
+        out.writeInt(postflg);
+        out.writeInt(waitcnt);
+        out.writeBoolean(halted);
+        out.writeBoolean(stopped);
+        out.writeInt(intrWaitMask);
+        out.writeBoolean(intrWaitSatisfied);
+    }
+
+    /// Restores the system-control state from a save state.
+    public void loadState(java.io.DataInputStream in) throws java.io.IOException {
+        postflg = in.readInt();
+        waitcnt = in.readInt();
+        halted = in.readBoolean();
+        stopped = in.readBoolean();
+        intrWaitMask = in.readInt();
+        intrWaitSatisfied = in.readBoolean();
     }
 }

@@ -4,6 +4,7 @@ import dev.vitorsilverio.gbaemu.core.MemorySpace;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.List;
 
 /// Estado inicial dos registradores de som do GBA.
 ///
@@ -67,6 +68,10 @@ public final class GbaAudio implements MemorySpace {
     private final PulseChannel channel2 = new PulseChannel(false);
     private final WaveChannel channel3 = new WaveChannel();
     private final NoiseChannel channel4 = new NoiseChannel();
+    // User-facing per-channel controls for the audio debug panel (not part of GBA state):
+    // indices 0-3 are PSG CH1-CH4, 4/5 are Direct Sound A/B. Reset() must not clear these.
+    private final boolean[] channelMuted = new boolean[6];
+    private final int[] channelVolume = {100, 100, 100, 100, 100, 100};
     private int lastSampleA;
     private int lastSampleB;
     private double psgHpfPrevInput;
@@ -179,6 +184,58 @@ public final class GbaAudio implements MemorySpace {
         return fifoB.size();
     }
 
+    /// Mutes or unmutes one channel (1-6: CH1-CH4 PSG, 5/6 Direct Sound A/B). A user
+    /// control for the debug panel; independent of the game's own enable bits.
+    public void setChannelMuted(int channel, boolean muted) {
+        channelMuted[channel - 1] = muted;
+    }
+
+    public boolean channelMuted(int channel) {
+        return channelMuted[channel - 1];
+    }
+
+    /// Scales one channel's contribution to the mix by {@code percent} (0-100). Lets the
+    /// user attenuate individual channels to isolate a problem source.
+    public void setChannelVolume(int channel, int percent) {
+        channelVolume[channel - 1] = Math.max(0, Math.min(100, percent));
+    }
+
+    public int channelVolume(int channel) {
+        return channelVolume[channel - 1];
+    }
+
+    /// Builds a read-only view of the whole sound unit for the debug panel.
+    public GbaAudioSnapshot debugSnapshot() {
+        int control = readRaw16(SOUNDCNT_H);
+        boolean enabledA = masterEnabled() && (control & DIRECT_SOUND_A_OUTPUT) != 0;
+        boolean enabledB = masterEnabled() && (control & DIRECT_SOUND_B_OUTPUT) != 0;
+        List<GbaAudioChannelSnapshot> channels = List.of(
+                channel1.snapshot("CH1 Pulse", 1),
+                channel2.snapshot("CH2 Pulse", 2),
+                channel3.snapshot("CH3 Wave", 3),
+                channel4.snapshot("CH4 Noise", 4),
+                directSnapshot("Direct A", 5, enabledA, lastSampleA, fifoA.size()),
+                directSnapshot("Direct B", 6, enabledB, lastSampleB, fifoB.size()));
+        return new GbaAudioSnapshot(
+                readRaw16(SOUNDCNT_L), control, readRaw16(SOUNDCNT_X), soundBias(),
+                masterEnabled(), OUTPUT_SAMPLE_RATE, pcm.size(), fifoA.size(), fifoB.size(), channels);
+    }
+
+    private GbaAudioChannelSnapshot directSnapshot(String name, int channel, boolean enabled, int lastSample, int fifoSize) {
+        return new GbaAudioChannelSnapshot(name, enabled, lastSample, 0.0,
+                channelMuted[channel - 1], channelVolume[channel - 1],
+                "fifo=" + fifoSize + " last=" + lastSample);
+    }
+
+    /// Applies the user's per-channel mute/volume to a channel's contribution.
+    private int userScaled(int channel, int value) {
+        if (channelMuted[channel - 1]) {
+            return 0;
+        }
+        int volume = channelVolume[channel - 1];
+        return volume == 100 ? value : value * volume / 100;
+    }
+
     public void tick(int cycles) {
         if (cycles <= 0) {
             return;
@@ -250,6 +307,40 @@ public final class GbaAudio implements MemorySpace {
             out[i] = pcm.removeFirst();
         }
         return out;
+    }
+
+    /// Serializes the sound register/mixer state into a save state. The transient FIFOs and
+    /// the PCM output queue are not stored (they refill from DMA/mixing after a reload), and
+    /// the user mute/volume preferences are left untouched (they are not GBA state).
+    public void saveState(java.io.DataOutputStream out) throws java.io.IOException {
+        out.write(registers);
+        out.writeInt(lastSampleA);
+        out.writeInt(lastSampleB);
+        out.writeLong(sampleAccumulator);
+        out.writeLong(frameSequencerAccumulator);
+        out.writeInt(frameSequencerStep);
+        out.writeDouble(psgHpfPrevInput);
+        out.writeDouble(psgHpfPrevOutput);
+    }
+
+    /// Restores the sound register/mixer state from a save state and resets the channels +
+    /// FIFOs so they re-derive from the restored registers (avoids stale in-flight notes).
+    public void loadState(java.io.DataInputStream in) throws java.io.IOException {
+        in.readFully(registers);
+        lastSampleA = in.readInt();
+        lastSampleB = in.readInt();
+        sampleAccumulator = in.readLong();
+        frameSequencerAccumulator = in.readLong();
+        frameSequencerStep = in.readInt();
+        psgHpfPrevInput = in.readDouble();
+        psgHpfPrevOutput = in.readDouble();
+        fifoA.clear();
+        fifoB.clear();
+        pcm.clear();
+        channel1.disable();
+        channel2.disable();
+        channel3.disable();
+        channel4.disable();
     }
 
     private int readSoundControlXByte(int address) {
@@ -362,10 +453,10 @@ public final class GbaAudio implements MemorySpace {
             default -> 0; // 100%
         };
 
-        int ch1 = channel1.output();
-        int ch2 = channel2.output();
-        int ch3 = channel3.output();
-        int ch4 = channel4.output();
+        int ch1 = userScaled(1, channel1.output());
+        int ch2 = userScaled(2, channel2.output());
+        int ch3 = userScaled(3, channel3.output());
+        int ch4 = userScaled(4, channel4.output());
         int psgLeft = 0;
         int psgRight = 0;
         if ((soundCntL & 0x0100) != 0) psgRight += ch1;
@@ -383,8 +474,8 @@ public final class GbaAudio implements MemorySpace {
 
         int directLeft = 0;
         int directRight = 0;
-        int sampleA = scaleDirectSound(lastSampleA, (soundCntH & DIRECT_SOUND_A_VOLUME_100) != 0);
-        int sampleB = scaleDirectSound(lastSampleB, (soundCntH & DIRECT_SOUND_B_VOLUME_100) != 0);
+        int sampleA = userScaled(5, scaleDirectSound(lastSampleA, (soundCntH & DIRECT_SOUND_A_VOLUME_100) != 0));
+        int sampleB = userScaled(6, scaleDirectSound(lastSampleB, (soundCntH & DIRECT_SOUND_B_VOLUME_100) != 0));
         if ((soundCntH & 0x0100) != 0) directRight += sampleA;
         if ((soundCntH & 0x0200) != 0) directLeft += sampleA;
         if ((soundCntH & 0x1000) != 0) directRight += sampleB;
@@ -632,6 +723,14 @@ public final class GbaAudio implements MemorySpace {
             return DUTY_PATTERNS[duty & 3][dutyStep] == 0 ? 0 : currentVolume;
         }
 
+        GbaAudioChannelSnapshot snapshot(String name, int channel) {
+            int duty = (sweepChannel ? readRaw16(SOUND1CNT_H) : readRaw16(SOUND2CNT_L)) >>> 14;
+            double freq = period >= 2048 ? 0.0 : 131072.0 / (2048 - period);
+            return new GbaAudioChannelSnapshot(name, enabled, currentVolume, freq,
+                    channelMuted[channel - 1], channelVolume[channel - 1],
+                    String.format("duty=%d period=%d", duty & 3, period));
+        }
+
         void tickLength() {
             tickLength(sweepChannel ? readRaw16(SOUND1CNT_X) : readRaw16(SOUND2CNT_H));
         }
@@ -641,7 +740,11 @@ public final class GbaAudio implements MemorySpace {
         }
 
         private int pulseTimerPeriod() {
-            return Math.max(4, (2048 - period) * 4);
+            // Cycles per duty step on the GBA's 16.78 MHz clock: a full 8-step wave is
+            // 131072/(2048-period) Hz, so one step is 16*(2048-period) CPU cycles. (The
+            // classic Game Boy value is 4*(2048-period) T-cycles; the GBA CPU runs 4x
+            // faster, hence the x4 — without it the channel played two octaves too high.)
+            return Math.max(16, (2048 - period) * 16);
         }
 
         private boolean triggerSweep() {
@@ -758,12 +861,23 @@ public final class GbaAudio implements MemorySpace {
             };
         }
 
+        GbaAudioChannelSnapshot snapshot(String name, int channel) {
+            double freq = period >= 2048 ? 0.0 : 65536.0 / (2048 - period);
+            int volumeCode = (readRaw16(SOUND3CNT_H) >>> 13) & 0x03;
+            return new GbaAudioChannelSnapshot(name, enabled, lastSample, freq,
+                    channelMuted[channel - 1], channelVolume[channel - 1],
+                    String.format("volCode=%d idx=%d", volumeCode, sampleIndex));
+        }
+
         void tickLength() {
             tickLength(readRaw16(SOUND3CNT_X));
         }
 
         private int waveTimerPeriod() {
-            return Math.max(2, (2048 - period) * 2);
+            // Cycles per 4-bit sample on the GBA clock = 8*(2048-period); the full 32-sample
+            // wave is 65536/(2048-period) Hz. (Game Boy value 2*(2048-period) T-cycles x4 for
+            // the 4x-faster GBA CPU clock.)
+            return Math.max(8, (2048 - period) * 8);
         }
 
         private int readWaveSample() {
@@ -815,6 +929,17 @@ public final class GbaAudio implements MemorySpace {
             return (lfsr & 1) == 0 ? currentVolume : 0;
         }
 
+        GbaAudioChannelSnapshot snapshot(String name, int channel) {
+            int value = readRaw16(SOUND4CNT_H) & 0xFF;
+            int divisorCode = value & 0x07;
+            int shift = (value >>> 4) & 0x0F;
+            double divisor = divisorCode == 0 ? 8.0 : divisorCode * 16.0;
+            double freq = shift >= 14 ? 0.0 : 524288.0 / divisor / (1 << (shift + 1));
+            return new GbaAudioChannelSnapshot(name, enabled, currentVolume, freq,
+                    channelMuted[channel - 1], channelVolume[channel - 1],
+                    String.format("div=%d shift=%d", divisorCode, shift));
+        }
+
         void tickLength() {
             tickLength(readRaw16(SOUND4CNT_H));
         }
@@ -828,7 +953,9 @@ public final class GbaAudio implements MemorySpace {
             int divisorCode = value & 0x07;
             int divisor = divisorCode == 0 ? 8 : divisorCode * 16;
             int shift = (value >>> 4) & 0x0F;
-            return Math.max(8, divisor << shift);
+            // (divisor<<shift) is the Game Boy T-cycle period; x4 converts it to the
+            // GBA's 4x-faster CPU clock so the LFSR (noise pitch) advances at the right rate.
+            return Math.max(32, (divisor << shift) * 4);
         }
     }
 }

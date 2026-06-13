@@ -86,6 +86,17 @@ public final class GbaDmaController implements MemorySpace {
             // the value the game wrote (e.g. the sound buffer start).
             internalSource[channel] = regRead32(channel, 0) & sourceMask(channel);
             internalDestination[channel] = regRead32(channel, 4) & destinationMask(channel);
+            // Immediate-timing DMAs start the instant they are enabled (the CPU is paused on
+            // hardware until they finish), so run synchronously here. This both (a) lets several
+            // back-to-back immediate DMAs on one channel each run before the next arm overwrites
+            // the registers (FireRed's MainMenuGpuInit VRAM/OAM/PLTT fills -> fixes the green
+            // Oak intro), and (b) makes the transferred data available immediately, as games that
+            // read an immediate DMA's result later in the same block expect (deferring it to the
+            // block-end hardware tick black-screened Castlevania). run() clears ENABLE for
+            // immediate DMAs, so a following back-to-back arm is still seen as a fresh 0->1.
+            if (startTiming(value) == START_IMMEDIATE) {
+                run(channel);
+            }
         }
     }
 
@@ -97,6 +108,8 @@ public final class GbaDmaController implements MemorySpace {
     }
 
     public void triggerImmediateTransfers() {
+        // Immediate DMAs already ran (and cleared their enable bit) the instant they were armed,
+        // so this normally finds nothing; kept as a safety net for any still-enabled channel.
         triggerTransfers(START_IMMEDIATE);
     }
 
@@ -126,17 +139,47 @@ public final class GbaDmaController implements MemorySpace {
         checkChannel(channel);
         int control = regRead16(channel, 10);
         if ((control & ENABLE) == 0) return;
+        runTransfer(channel, internalSource[channel], internalDestination[channel],
+                regRead16(channel, 8), control);
+    }
 
+    /// Serializes the DMA registers and internal source/destination pointers into a save state.
+    public void saveState(java.io.DataOutputStream out) throws java.io.IOException {
+        out.write(registers);
+        for (int i = 0; i < 4; i++) {
+            out.writeInt(internalSource[i]);
+            out.writeInt(internalDestination[i]);
+        }
+    }
+
+    /// Restores the DMA registers and internal pointers from a save state.
+    public void loadState(java.io.DataInputStream in) throws java.io.IOException {
+        in.readFully(registers);
+        for (int i = 0; i < 4; i++) {
+            internalSource[i] = in.readInt();
+            internalDestination[i] = in.readInt();
+        }
+    }
+
+    /// Performs one DMA transfer with an explicit source/dest/count/control, so a queued
+    /// immediate DMA can run from the snapshot taken when it was armed (its channel registers
+    /// may since have been overwritten by a later arm on the same channel). Advances the internal
+    /// pointers and, for non-repeat / immediate DMAs, clears the channel's enable bit.
+    private void runTransfer(int channel, int source, int destination, int count, int control) {
         boolean wordTransfer = (control & WORD_TRANSFER) != 0;
         int unitSize = wordTransfer ? 4 : 2;
-        int count = regRead16(channel, 8);
         if (count == 0) count = channel == 3 ? 0x10000 : 0x4000;
         int sourceStep      = addressStep((control >>> SOURCE_CONTROL_SHIFT) & 0x3, unitSize);
         int destinationMode = (control >>> DEST_CONTROL_SHIFT) & 0x3;
         int destinationStep = addressStep(destinationMode, unitSize);
 
-        int currentSource = internalSource[channel];
-        int currentDest   = internalDestination[channel];
+        // The GBA DMA forces both endpoints to the transfer-size alignment (16/32-bit): the
+        // low address bit(s) are ignored by hardware. Games rely on this — e.g. Metroid Fusion
+        // passes a THUMB routine's odd address (bit 0 set) as the source of a 32-bit copy and
+        // expects it aligned down; reading it verbatim would shift the data by a byte (garbage).
+        int alignMask = ~(unitSize - 1);
+        int currentSource = source & alignMask;
+        int currentDest   = destination & alignMask;
         for (int i = 0; i < count; i++) {
             if (wordTransfer) bus.write32(currentDest, bus.read32(currentSource));
             else              bus.write16(currentDest, bus.read16(currentSource));
@@ -152,7 +195,7 @@ public final class GbaDmaController implements MemorySpace {
                 : currentDest;
 
         if ((control & REPEAT) == 0 || startTiming(control) == START_IMMEDIATE) {
-            regWrite16(channel, 10, control & ~ENABLE);
+            regWrite16(channel, 10, regRead16(channel, 10) & ~ENABLE);
         }
         if (interrupts != null && (control & IRQ_ON_END) != 0) {
             interrupts.request(GbaInterrupt.values()[GbaInterrupt.DMA0.ordinal() + channel]);
@@ -170,10 +213,10 @@ public final class GbaDmaController implements MemorySpace {
 
     private void runAudioFifo(int channel) {
         int control     = regRead16(channel, 10);
-        int destination = regRead32(channel, 4) & destinationMask(channel);
+        int destination = regRead32(channel, 4) & destinationMask(channel) & ~3;
         int sourceStep  = addressStep((control >>> SOURCE_CONTROL_SHIFT) & 0x3, 4);
 
-        int currentSource = internalSource[channel];
+        int currentSource = internalSource[channel] & ~3; // sound FIFO DMA is always 32-bit aligned
         for (int i = 0; i < 4; i++) {
             bus.write32(destination, bus.read32(currentSource));
             currentSource += sourceStep;

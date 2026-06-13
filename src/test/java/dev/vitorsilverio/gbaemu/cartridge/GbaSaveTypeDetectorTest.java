@@ -36,6 +36,20 @@ class GbaSaveTypeDetectorTest {
         assertEquals(GbaSaveType.EEPROM, cartridge.saveType());
     }
 
+    @Test
+    void fallsBackToGameCodeOverrideWhenNoMarkerPresent() {
+        byte[] rom = new byte[0x200];
+        putAscii(rom, 0xAC, "A2CE"); // Castlevania ships without a save-type marker string
+        assertEquals(GbaSaveType.SRAM, GbaSaveTypeDetector.detect(rom));
+    }
+
+    @Test
+    void unknownGameCodeWithoutMarkerStaysNone() {
+        byte[] rom = new byte[0x200];
+        putAscii(rom, 0xAC, "ZZZZ");
+        assertEquals(GbaSaveType.NONE, GbaSaveTypeDetector.detect(rom));
+    }
+
     private static byte[] romWith(String signature) {
         byte[] rom = new byte[0x200];
         putAscii(rom, 0x100, signature);

@@ -162,8 +162,8 @@ class GbaAudioTest {
         audio.writeHalfWord(GbaAudio.SOUNDCNT_X, 0x0080);   // master enable
         audio.writeHalfWord(GbaAudio.SOUNDCNT_L, 0x2277);   // channel 2 L+R, max master volume
         audio.writeHalfWord(GbaAudio.SOUNDCNT_H, 0x0002);   // PSG ratio 100%, no Direct Sound
-        audio.writeHalfWord(GbaAudio.SOUND2CNT_L, 0xF080);  // duty 50%, envelope volume 15
-        audio.writeHalfWord(GbaAudio.SOUND2CNT_H, 0x8400);  // trigger, period 1024 (~512 Hz)
+        audio.writeHalfWord(GbaAudio.SOUND2CNT_L, 0xF080);  // duty, envelope volume 15
+        audio.writeHalfWord(GbaAudio.SOUND2CNT_H, 0x8400);  // trigger, period 1024 (128 Hz)
 
         // Tick in small batches, the way the console drives audio per CPU block, so the
         // duty step is sampled over time instead of frozen at the end of a giant batch.
@@ -183,6 +183,37 @@ class GbaAudioTest {
     }
 
     @Test
+    void pulseChannelPlaysAtGbaTunedFrequencyNotFourTimesTooHigh() {
+        GbaAudio audio = new GbaAudio();
+        audio.writeHalfWord(GbaAudio.SOUNDCNT_X, 0x0080);   // master enable
+        audio.writeHalfWord(GbaAudio.SOUNDCNT_L, 0x2277);   // channel 2 L+R, max master volume
+        audio.writeHalfWord(GbaAudio.SOUNDCNT_H, 0x0002);   // PSG ratio 100%, no Direct Sound
+        audio.writeHalfWord(GbaAudio.SOUND2CNT_L, 0xF080);  // duty, envelope volume 15
+        audio.writeHalfWord(GbaAudio.SOUND2CNT_H, 0x8400);  // trigger, period 1024 => 128 Hz
+
+        // Half a second of audio. Frequency = 131072/(2048-1024) = 128 Hz, so we expect
+        // ~64 wave cycles. The pre-fix bug ran the frequency timer on the Game Boy clock
+        // (4x too fast) and produced ~256 cycles — this guards that regression.
+        for (int cycle = 0; cycle < 16_777_216 / 2; cycle += 128) {
+            audio.tick(128);
+        }
+        byte[] samples = audio.drainPcm(16_384);
+
+        int waveCycles = 0;
+        boolean high = false;
+        for (int i = 64; i < samples.length; i++) { // skip the high-pass settling transient
+            if (!high && samples[i] > 4) {
+                waveCycles++;
+                high = true;
+            } else if (high && samples[i] < -4) {
+                high = false;
+            }
+        }
+        assertTrue(waveCycles >= 30 && waveCycles <= 150,
+                "expected ~64 wave cycles for a 128 Hz square (not ~256 from the 4x bug), got " + waveCycles);
+    }
+
+    @Test
     void soundControlHResetBitsClearFifosAndAreNotStored() {
         GbaAudio audio = new GbaAudio();
 
@@ -193,5 +224,61 @@ class GbaAudioTest {
         assertEquals(0, audio.fifoASize());
         assertEquals(0, audio.fifoBSize());
         assertEquals(0x0400, audio.readHalfWord(GbaAudio.SOUNDCNT_H));
+    }
+
+    @Test
+    void mutingPsgChannelSilencesItEvenWhenActive() {
+        GbaAudio audio = new GbaAudio();
+        audio.writeHalfWord(GbaAudio.SOUNDCNT_X, 0x0080);   // master enable
+        audio.writeHalfWord(GbaAudio.SOUNDCNT_L, 0x2277);   // channel 2 L+R, max master volume
+        audio.writeHalfWord(GbaAudio.SOUNDCNT_H, 0x0002);   // PSG ratio 100%, no Direct Sound
+        audio.writeHalfWord(GbaAudio.SOUND2CNT_L, 0xF080);  // duty 50%, envelope volume 15
+        audio.writeHalfWord(GbaAudio.SOUND2CNT_H, 0x8400);  // trigger, period 1024
+        audio.setChannelMuted(2, true);
+
+        for (int i = 0; i < 2048; i++) {
+            audio.tick(64);
+        }
+        byte[] samples = audio.drainPcm(256);
+
+        assertTrue(samples.length > 0, "expected mixed samples");
+        for (byte sample : samples) {
+            assertEquals(0, sample, "a muted channel must contribute nothing to the mix");
+        }
+    }
+
+    @Test
+    void channelVolumeClampsAndUserControlsRoundTrip() {
+        GbaAudio audio = new GbaAudio();
+
+        audio.setChannelVolume(1, 250);
+        assertEquals(100, audio.channelVolume(1));
+        audio.setChannelVolume(1, -5);
+        assertEquals(0, audio.channelVolume(1));
+        audio.setChannelVolume(3, 60);
+        assertEquals(60, audio.channelVolume(3));
+
+        assertFalse(audio.channelMuted(6));
+        audio.setChannelMuted(6, true);
+        assertTrue(audio.channelMuted(6));
+    }
+
+    @Test
+    void debugSnapshotReportsAllSixChannelsAndUserControls() {
+        GbaAudio audio = new GbaAudio();
+        audio.writeHalfWord(GbaAudio.SOUNDCNT_X, 0x0080);   // master enable
+        audio.setChannelMuted(3, true);
+        audio.setChannelVolume(4, 40);
+
+        GbaAudioSnapshot snapshot = audio.debugSnapshot();
+
+        assertTrue(snapshot.masterEnabled());
+        assertEquals(6, snapshot.channels().size());
+        assertEquals("CH1 Pulse", snapshot.channels().get(0).name());
+        assertEquals("CH3 Wave", snapshot.channels().get(2).name());
+        assertTrue(snapshot.channels().get(2).muted());
+        assertEquals(40, snapshot.channels().get(3).userVolumePercent());
+        assertEquals("Direct A", snapshot.channels().get(4).name());
+        assertEquals("Direct B", snapshot.channels().get(5).name());
     }
 }

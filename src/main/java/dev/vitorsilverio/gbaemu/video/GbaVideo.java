@@ -4,10 +4,14 @@ import dev.vitorsilverio.armjitter.memory.AddressSpace;
 
 import java.util.Arrays;
 
-/// Renderer inicial da PPU do GBA.
+/// Renderer da PPU do GBA, baseado em scanline.
 ///
-/// Nesta fase ele cobre modos bitmap, backgrounds regulares e sprites simples,
-/// criando um framebuffer observavel durante o bring-up da BIOS.
+/// Cada scanline e desenhada com o estado dos registradores no instante em que a linha
+/// e exibida (ver {@link #renderScanline}), permitindo efeitos por-linha (affine variando
+/// por scanline, scroll/prioridade/janela trocados no HBlank). A composicao mantem as duas
+/// camadas mais a frente por pixel para suportar alpha blending (BLDCNT/BLDALPHA),
+/// fade de brilho (BLDY) e sprites semi-transparentes. {@link #renderFrame} desenha o
+/// quadro inteiro chamando as 160 linhas em sequencia (caminho headless/testes).
 public final class GbaVideo {
     public static final int WIDTH = 240;
     public static final int HEIGHT = 160;
@@ -34,6 +38,9 @@ public final class GbaVideo {
     private static final int WIN1V = 0x04000046;
     private static final int WININ = 0x04000048;
     private static final int WINOUT = 0x0400004A;
+    private static final int BLDCNT = 0x04000050;
+    private static final int BLDALPHA = 0x04000052;
+    private static final int BLDY = 0x04000054;
     private static final int FORCED_BLANK = 1 << 7;
     private static final int BG_ENABLE_SHIFT = 8;
     private static final int BG2_ENABLE = 1 << 10;
@@ -43,6 +50,7 @@ public final class GbaVideo {
     private static final int WIN1_ENABLE = 1 << 14;
     private static final int OBJ_WINDOW_ENABLE = 1 << 15;
     private static final int WINDOW_OBJ_ENABLE = 1 << 4;
+    private static final int WINDOW_BLEND_ENABLE = 1 << 5;
     private static final int WINDOW_ALL_LAYERS = 0x1F;
     private static final int VRAM = 0x06000000;
     private static final int OAM = 0x07000000;
@@ -55,81 +63,257 @@ public final class GbaVideo {
     private static final int TILE_SIZE = 8;
     private static final int MAP_BLOCK_SIZE = 0x800;
     private static final int CHAR_BLOCK_SIZE = 0x4000;
-    private static final int TRANSPARENT = 0;
+    private static final int TRANSPARENT = -1;
+    // Layer ids, chosen to match the BLDCNT target bit positions (bit0=BG0..bit4=OBJ,bit5=backdrop).
+    private static final int LAYER_OBJ = 4;
+    private static final int LAYER_BACKDROP = 5;
+    private static final int BACKDROP_PRIORITY = 5;
 
     private final int[] framebuffer = new int[WIDTH * HEIGHT];
-    private final int[] priorities = new int[WIDTH * HEIGHT];
-    private final byte[] windowMasks = new byte[WIDTH * HEIGHT];
+    private volatile int[] presentedFrame = new int[WIDTH * HEIGHT];
+
+    // Per-scanline compositor: the two front-most layers per pixel (colours are BGR555),
+    // used to apply alpha blending / fade after all layers are gathered.
+    private final int[] topColor = new int[WIDTH];
+    private final int[] topPriority = new int[WIDTH];
+    private final int[] topLayer = new int[WIDTH];
+    private final boolean[] topObjSemi = new boolean[WIDTH];
+    private final int[] secondColor = new int[WIDTH];
+    private final int[] secondPriority = new int[WIDTH];
+    private final int[] secondLayer = new int[WIDTH];
+    // Front-most OBJ pixel per column for this scanline (gathered before BG compositing).
+    private final int[] objColor = new int[WIDTH];
+    private final int[] objPriority = new int[WIDTH];
+    private final boolean[] objSemi = new boolean[WIDTH];
+    private final byte[] windowMaskLine = new byte[WIDTH];
+
+    // Internal affine reference points (BG2/BG3), reloaded from the register at frame top
+    // and on a mid-frame rewrite, advanced by PB/PD per scanline otherwise.
+    private int affineRefX2;
+    private int affineRefY2;
+    private int affineRefX3;
+    private int affineRefY3;
+    private int lastBg2xReg;
+    private int lastBg2yReg;
+    private int lastBg3xReg;
+    private int lastBg3yReg;
 
     public int[] renderFrame(AddressSpace memory) {
-        int dispcnt = memory.read16(DISPCNT);
-        int mode = dispcnt & 0x7;
-
-        if ((dispcnt & FORCED_BLANK) != 0) {
-            Arrays.fill(framebuffer, 0xFFFFFFFF);
-            return framebufferSnapshot();
+        for (int line = 0; line < HEIGHT; line++) {
+            renderScanline(memory, line);
         }
-        Arrays.fill(framebuffer, bgr555ToArgb(memory.read16(PALETTE)));
-        Arrays.fill(priorities, 4);
-        byte[] layerMasks = activeWindowMasks(memory, dispcnt);
+        return framebufferSnapshot();
+    }
 
-        switch (mode) {
-            case 0 -> renderTileBackgrounds(memory, dispcnt, 0b1111, 0, layerMasks);
-            case 1 -> renderTileBackgrounds(memory, dispcnt, 0b0011, 0b0100, layerMasks);
-            case 2 -> renderTileBackgrounds(memory, dispcnt, 0, 0b1100, layerMasks);
-            case 3 -> renderMode3(memory, layerMasks);
-            case 4 -> renderMode4(memory, (dispcnt & (1 << 4)) != 0, layerMasks);
-            case 5 -> renderMode5(memory, (dispcnt & (1 << 4)) != 0, layerMasks);
+    public void renderScanline(AddressSpace memory, int line) {
+        if (line < 0 || line >= HEIGHT) {
+            return;
+        }
+        syncAffineReferences(memory, line);
+
+        int dispcnt = memory.read16(DISPCNT);
+        int lineBase = line * WIDTH;
+        if ((dispcnt & FORCED_BLANK) != 0) {
+            Arrays.fill(framebuffer, lineBase, lineBase + WIDTH, 0xFFFFFFFF);
+            advanceAffineReferences(memory);
+            if (line == HEIGHT - 1) {
+                present();
+            }
+            return;
+        }
+
+        int backdrop = memory.read16(PALETTE) & 0x7FFF;
+        for (int x = 0; x < WIDTH; x++) {
+            topColor[x] = backdrop;
+            topPriority[x] = BACKDROP_PRIORITY;
+            topLayer[x] = LAYER_BACKDROP;
+            topObjSemi[x] = false;
+            secondColor[x] = backdrop;
+            secondPriority[x] = BACKDROP_PRIORITY;
+            secondLayer[x] = LAYER_BACKDROP;
+            objColor[x] = TRANSPARENT;
+        }
+
+        byte[] mask = activeWindowMaskLine(memory, dispcnt, line);
+        if ((dispcnt & OBJ_ENABLE) != 0) {
+            gatherObjectsLine(memory, dispcnt, line, mask);
+        }
+        switch (dispcnt & 0x7) {
+            case 0 -> renderTileBackgroundsLine(memory, dispcnt, 0b1111, 0, line, mask);
+            case 1 -> renderTileBackgroundsLine(memory, dispcnt, 0b0011, 0b0100, line, mask);
+            case 2 -> renderTileBackgroundsLine(memory, dispcnt, 0, 0b1100, line, mask);
+            case 3 -> renderMode3Line(memory, line, mask);
+            case 4 -> renderMode4Line(memory, (dispcnt & (1 << 4)) != 0, line, mask);
+            case 5 -> renderMode5Line(memory, (dispcnt & (1 << 4)) != 0, line, mask);
             default -> {
             }
         }
-        if ((dispcnt & OBJ_ENABLE) != 0) {
-            renderObjects(memory, dispcnt, layerMasks);
+        for (int x = 0; x < WIDTH; x++) {
+            if (objColor[x] != TRANSPARENT) {
+                submit(x, objColor[x], objPriority[x], LAYER_OBJ, objSemi[x]);
+            }
         }
 
-        return framebufferSnapshot();
+        int bldcnt = memory.read16(BLDCNT);
+        int bldalpha = memory.read16(BLDALPHA);
+        int bldy = memory.read16(BLDY);
+        for (int x = 0; x < WIDTH; x++) {
+            framebuffer[lineBase + x] = bgr555ToArgb(composite(x, bldcnt, bldalpha, bldy, mask));
+        }
+
+        advanceAffineReferences(memory);
+        if (line == HEIGHT - 1) {
+            present();
+        }
     }
 
     public int[] framebufferSnapshot() {
         return Arrays.copyOf(framebuffer, framebuffer.length);
     }
 
-    private void renderTileBackgrounds(
+    public int[] presentedFrame() {
+        return presentedFrame;
+    }
+
+    private void present() {
+        presentedFrame = Arrays.copyOf(framebuffer, framebuffer.length);
+    }
+
+    /// Inserts one opaque layer pixel into the per-pixel top/second slots, keeping them
+    /// ordered front-to-back (lower priority number wins; OBJ beats BG at equal priority;
+    /// lower BG number beats higher; backdrop is always last).
+    private void submit(int x, int color, int priority, int layer, boolean objIsSemi) {
+        if (isInFront(priority, layer, topPriority[x], topLayer[x])) {
+            secondColor[x] = topColor[x];
+            secondPriority[x] = topPriority[x];
+            secondLayer[x] = topLayer[x];
+            topColor[x] = color;
+            topPriority[x] = priority;
+            topLayer[x] = layer;
+            topObjSemi[x] = objIsSemi;
+        } else if (isInFront(priority, layer, secondPriority[x], secondLayer[x])) {
+            secondColor[x] = color;
+            secondPriority[x] = priority;
+            secondLayer[x] = layer;
+        }
+    }
+
+    private static boolean isInFront(int priorityA, int layerA, int priorityB, int layerB) {
+        if (priorityA != priorityB) {
+            return priorityA < priorityB;
+        }
+        boolean objA = layerA == LAYER_OBJ;
+        boolean objB = layerB == LAYER_OBJ;
+        if (objA != objB) {
+            return objA;
+        }
+        return layerA < layerB;
+    }
+
+    /// Resolves the final BGR555 colour for a pixel, applying blending/fade. Blending is
+    /// suppressed inside a window region whose blend bit is cleared.
+    private int composite(int x, int bldcnt, int bldalpha, int bldy, byte[] mask) {
+        int top = topColor[x];
+        boolean blendAllowed = mask == null || (mask[x] & WINDOW_BLEND_ENABLE) != 0;
+        boolean semiObj = topObjSemi[x] && topLayer[x] == LAYER_OBJ;
+
+        if (blendAllowed && semiObj && isSecondTarget(bldcnt, secondLayer[x])) {
+            return alphaBlend(top, secondColor[x], bldalpha);
+        }
+        if (!blendAllowed) {
+            return top;
+        }
+
+        int mode = (bldcnt >>> 6) & 0x3;
+        boolean topIsFirstTarget = (bldcnt & (1 << topLayer[x])) != 0;
+        return switch (mode) {
+            case 1 -> topIsFirstTarget && isSecondTarget(bldcnt, secondLayer[x])
+                    ? alphaBlend(top, secondColor[x], bldalpha)
+                    : top;
+            case 2 -> topIsFirstTarget ? brighten(top, bldy) : top;
+            case 3 -> topIsFirstTarget ? darken(top, bldy) : top;
+            default -> top;
+        };
+    }
+
+    private static boolean isSecondTarget(int bldcnt, int layer) {
+        return (bldcnt & (1 << (8 + layer))) != 0;
+    }
+
+    private static int alphaBlend(int first, int second, int bldalpha) {
+        int eva = Math.min(16, bldalpha & 0x1F);
+        int evb = Math.min(16, (bldalpha >>> 8) & 0x1F);
+        int r = Math.min(31, ((first & 0x1F) * eva + (second & 0x1F) * evb) >> 4);
+        int g = Math.min(31, (((first >>> 5) & 0x1F) * eva + ((second >>> 5) & 0x1F) * evb) >> 4);
+        int b = Math.min(31, (((first >>> 10) & 0x1F) * eva + ((second >>> 10) & 0x1F) * evb) >> 4);
+        return r | (g << 5) | (b << 10);
+    }
+
+    private static int brighten(int color, int bldy) {
+        int evy = Math.min(16, bldy & 0x1F);
+        int r = color & 0x1F;
+        int g = (color >>> 5) & 0x1F;
+        int b = (color >>> 10) & 0x1F;
+        r += ((31 - r) * evy) >> 4;
+        g += ((31 - g) * evy) >> 4;
+        b += ((31 - b) * evy) >> 4;
+        return r | (g << 5) | (b << 10);
+    }
+
+    private static int darken(int color, int bldy) {
+        int evy = Math.min(16, bldy & 0x1F);
+        int r = color & 0x1F;
+        int g = (color >>> 5) & 0x1F;
+        int b = (color >>> 10) & 0x1F;
+        r -= (r * evy) >> 4;
+        g -= (g * evy) >> 4;
+        b -= (b * evy) >> 4;
+        return r | (g << 5) | (b << 10);
+    }
+
+    private void syncAffineReferences(AddressSpace memory, int line) {
+        int bg2x = memory.read32(BG2X);
+        int bg2y = memory.read32(BG2Y);
+        int bg3x = memory.read32(BG3X);
+        int bg3y = memory.read32(BG3Y);
+        if (line == 0 || bg2x != lastBg2xReg) affineRefX2 = signed28(bg2x);
+        if (line == 0 || bg2y != lastBg2yReg) affineRefY2 = signed28(bg2y);
+        if (line == 0 || bg3x != lastBg3xReg) affineRefX3 = signed28(bg3x);
+        if (line == 0 || bg3y != lastBg3yReg) affineRefY3 = signed28(bg3y);
+        lastBg2xReg = bg2x;
+        lastBg2yReg = bg2y;
+        lastBg3xReg = bg3x;
+        lastBg3yReg = bg3y;
+    }
+
+    private void advanceAffineReferences(AddressSpace memory) {
+        affineRefX2 += signed16(memory.read16(BG2PB));
+        affineRefY2 += signed16(memory.read16(BG2PD));
+        affineRefX3 += signed16(memory.read16(BG3PB));
+        affineRefY3 += signed16(memory.read16(BG3PD));
+    }
+
+    private void renderTileBackgroundsLine(
             AddressSpace memory,
             int dispcnt,
             int regularMask,
             int affineMask,
-            byte[] layerMasks) {
-        for (int priority = 3; priority >= 0; priority--) {
-            for (int bg = 3; bg >= 0; bg--) {
-                if ((dispcnt & (1 << (BG_ENABLE_SHIFT + bg))) == 0) {
-                    continue;
-                }
-                int bgcnt = bgControl(memory, bg);
-                if ((bgcnt & 0x3) != priority) {
-                    continue;
-                }
-                if ((regularMask & (1 << bg)) != 0) {
-                    renderRegularBackground(memory, bg, bgcnt, layerMasks);
-                } else if ((affineMask & (1 << bg)) != 0) {
-                    renderAffineBackground(memory, bg, bgcnt, layerMasks);
-                }
+            int line,
+            byte[] mask) {
+        for (int bg = 0; bg < 4; bg++) {
+            if ((dispcnt & (1 << (BG_ENABLE_SHIFT + bg))) == 0) {
+                continue;
+            }
+            int bgcnt = bgControl(memory, bg);
+            if ((regularMask & (1 << bg)) != 0) {
+                renderRegularBackgroundLine(memory, bg, bgcnt, line, mask);
+            } else if ((affineMask & (1 << bg)) != 0) {
+                renderAffineBackgroundLine(memory, bg, bgcnt, line, mask);
             }
         }
     }
 
-    private void renderRegularBackground(AddressSpace memory, int bg, int bgcnt, byte[] layerMasks) {
-        for (int y = 0; y < HEIGHT; y++) {
-            renderRegularBackgroundLine(memory, bg, bgcnt, y, layerMasks);
-        }
-    }
-
-    private void renderRegularBackgroundLine(
-            AddressSpace memory,
-            int bg,
-            int bgcnt,
-            int screenY,
-            byte[] layerMasks) {
+    private void renderRegularBackgroundLine(AddressSpace memory, int bg, int bgcnt, int screenY, byte[] mask) {
         int charBase = VRAM + ((bgcnt >>> 2) & 0x3) * CHAR_BLOCK_SIZE;
         boolean eightBpp = (bgcnt & (1 << 7)) != 0;
         int screenBase = VRAM + ((bgcnt >>> 8) & 0x1F) * MAP_BLOCK_SIZE;
@@ -139,51 +323,41 @@ public final class GbaVideo {
         int hofs = memory.read16(BG0HOFS + bg * 4) & 0x1FF;
         int vofs = memory.read16(BG0VOFS + bg * 4) & 0x1FF;
         int sourceY = Math.floorMod(screenY + vofs, bgHeight);
+        int priority = bgcnt & 0x3;
 
         for (int screenX = 0; screenX < WIDTH; screenX++) {
-            int index = screenY * WIDTH + screenX;
-            if (!layerEnabled(layerMasks, index, bg)) {
+            if (!layerEnabled(mask, screenX, bg)) {
                 continue;
             }
             int sourceX = Math.floorMod(screenX + hofs, bgWidth);
             int color = regularBackgroundPixel(memory, charBase, screenBase, size, eightBpp, sourceX, sourceY);
             if (color != TRANSPARENT) {
-                framebuffer[index] = color;
-                priorities[index] = bgcnt & 0x3;
+                submit(screenX, color, priority, bg, false);
             }
         }
     }
 
-    private void renderAffineBackground(AddressSpace memory, int bg, int bgcnt, byte[] layerMasks) {
+    private void renderAffineBackgroundLine(AddressSpace memory, int bg, int bgcnt, int line, byte[] mask) {
         int charBase = VRAM + ((bgcnt >>> 2) & 0x3) * CHAR_BLOCK_SIZE;
         int screenBase = VRAM + ((bgcnt >>> 8) & 0x1F) * MAP_BLOCK_SIZE;
         boolean wrap = (bgcnt & (1 << 13)) != 0;
         int size = affineBackgroundSize((bgcnt >>> 14) & 0x3);
         int registerBase = bg == 2 ? BG2PA : BG3PA;
         int pa = signed16(memory.read16(registerBase));
-        int pb = signed16(memory.read16(registerBase + 2));
         int pc = signed16(memory.read16(registerBase + 4));
-        int pd = signed16(memory.read16(registerBase + 6));
-        int refX = signed28(memory.read32(bg == 2 ? BG2X : BG3X));
-        int refY = signed28(memory.read32(bg == 2 ? BG2Y : BG3Y));
+        int sourceX = bg == 2 ? affineRefX2 : affineRefX3;
+        int sourceY = bg == 2 ? affineRefY2 : affineRefY3;
+        int priority = bgcnt & 0x3;
 
-        for (int screenY = 0; screenY < HEIGHT; screenY++) {
-            int sourceX = refX + pb * screenY;
-            int sourceY = refY + pd * screenY;
-            for (int screenX = 0; screenX < WIDTH; screenX++) {
-                int index = screenY * WIDTH + screenX;
-                int pixelX = sourceX >> 8;
-                int pixelY = sourceY >> 8;
-                if (layerEnabled(layerMasks, index, bg)) {
-                    int color = affineBackgroundPixel(memory, charBase, screenBase, size, wrap, pixelX, pixelY);
-                    if (color != TRANSPARENT) {
-                        framebuffer[index] = color;
-                        priorities[index] = bgcnt & 0x3;
-                    }
+        for (int screenX = 0; screenX < WIDTH; screenX++) {
+            if (layerEnabled(mask, screenX, bg)) {
+                int color = affineBackgroundPixel(memory, charBase, screenBase, size, wrap, sourceX >> 8, sourceY >> 8);
+                if (color != TRANSPARENT) {
+                    submit(screenX, color, priority, bg, false);
                 }
-                sourceX += pa;
-                sourceY += pc;
             }
+            sourceX += pa;
+            sourceY += pc;
         }
     }
 
@@ -210,7 +384,7 @@ public final class GbaVideo {
         if (paletteIndex == 0) {
             return TRANSPARENT;
         }
-        return bgr555ToArgb(memory.read16(PALETTE + paletteIndex * 2));
+        return memory.read16(PALETTE + paletteIndex * 2) & 0x7FFF;
     }
 
     private int regularBackgroundPixel(
@@ -244,69 +418,53 @@ public final class GbaVideo {
         if (paletteIndex == 0) {
             return TRANSPARENT;
         }
-        return bgr555ToArgb(memory.read16(PALETTE + paletteIndex * 2));
+        return memory.read16(PALETTE + paletteIndex * 2) & 0x7FFF;
     }
 
-    private void renderMode3(AddressSpace memory, byte[] layerMasks) {
+    private void renderMode3Line(AddressSpace memory, int line, byte[] mask) {
         if ((memory.read16(DISPCNT) & BG2_ENABLE) == 0) {
             return;
         }
-        for (int y = 0; y < HEIGHT; y++) {
-            int line = y * WIDTH;
-            int source = VRAM + line * 2;
-            for (int x = 0; x < WIDTH; x++) {
-                int index = line + x;
-                if (!layerEnabled(layerMasks, index, 2)) {
-                    continue;
-                }
-                framebuffer[index] = bgr555ToArgb(memory.read16(source + x * 2));
-                priorities[index] = 2;
+        int source = VRAM + line * WIDTH * 2;
+        int priority = bgControl(memory, 2) & 0x3;
+        for (int x = 0; x < WIDTH; x++) {
+            if (layerEnabled(mask, x, 2)) {
+                submit(x, memory.read16(source + x * 2) & 0x7FFF, priority, 2, false);
             }
         }
     }
 
-    private void renderMode4(AddressSpace memory, boolean backBuffer, byte[] layerMasks) {
+    private void renderMode4Line(AddressSpace memory, boolean backBuffer, int line, byte[] mask) {
         if ((memory.read16(DISPCNT) & BG2_ENABLE) == 0) {
             return;
         }
-        int base = VRAM + (backBuffer ? FRAME_1 : 0);
-        for (int y = 0; y < HEIGHT; y++) {
-            int line = y * WIDTH;
-            int source = base + line;
-            for (int x = 0; x < WIDTH; x++) {
-                int index = line + x;
-                if (!layerEnabled(layerMasks, index, 2)) {
-                    continue;
-                }
-                int paletteIndex = memory.read8(source + x);
-                if (paletteIndex != 0) {
-                    framebuffer[index] = bgr555ToArgb(memory.read16(PALETTE + paletteIndex * 2));
-                    priorities[index] = 2;
-                }
+        int source = VRAM + (backBuffer ? FRAME_1 : 0) + line * WIDTH;
+        int priority = bgControl(memory, 2) & 0x3;
+        for (int x = 0; x < WIDTH; x++) {
+            if (!layerEnabled(mask, x, 2)) {
+                continue;
+            }
+            int paletteIndex = memory.read8(source + x);
+            if (paletteIndex != 0) {
+                submit(x, memory.read16(PALETTE + paletteIndex * 2) & 0x7FFF, priority, 2, false);
             }
         }
     }
 
-    private void renderMode5(AddressSpace memory, boolean backBuffer, byte[] layerMasks) {
-        if ((memory.read16(DISPCNT) & BG2_ENABLE) == 0) {
+    private void renderMode5Line(AddressSpace memory, boolean backBuffer, int line, byte[] mask) {
+        if ((memory.read16(DISPCNT) & BG2_ENABLE) == 0 || line >= MODE_5_HEIGHT) {
             return;
         }
-        int base = VRAM + (backBuffer ? FRAME_1 : 0);
-        for (int y = 0; y < MODE_5_HEIGHT; y++) {
-            int line = y * WIDTH;
-            int source = base + y * MODE_5_WIDTH * 2;
-            for (int x = 0; x < MODE_5_WIDTH; x++) {
-                int index = line + x;
-                if (!layerEnabled(layerMasks, index, 2)) {
-                    continue;
-                }
-                framebuffer[index] = bgr555ToArgb(memory.read16(source + x * 2));
-                priorities[index] = 2;
+        int source = VRAM + (backBuffer ? FRAME_1 : 0) + line * MODE_5_WIDTH * 2;
+        int priority = bgControl(memory, 2) & 0x3;
+        for (int x = 0; x < MODE_5_WIDTH; x++) {
+            if (layerEnabled(mask, x, 2)) {
+                submit(x, memory.read16(source + x * 2) & 0x7FFF, priority, 2, false);
             }
         }
     }
 
-    private void renderObjects(AddressSpace memory, int dispcnt, byte[] layerMasks) {
+    private void gatherObjectsLine(AddressSpace memory, int dispcnt, int line, byte[] mask) {
         boolean oneDimensionalMapping = (dispcnt & OBJ_1D_MAPPING) != 0;
         for (int object = 127; object >= 0; object--) {
             int base = OAM + object * 8;
@@ -330,38 +488,32 @@ public final class GbaVideo {
             if (y >= 160) {
                 y -= 256;
             }
-            if (y >= HEIGHT || y + renderHeight <= 0) {
+            int py = line - y;
+            if (py < 0 || py >= renderHeight) {
                 continue;
             }
+            boolean semiTransparent = objectMode == 1;
             if (affine) {
-                renderAffineObject(
-                        memory,
-                        oneDimensionalMapping,
-                        attr0,
-                        attr1,
-                        attr2,
-                        y,
-                        width,
-                        height,
-                        renderWidth,
-                        renderHeight,
-                        layerMasks);
+                gatherAffineObjectLine(memory, oneDimensionalMapping, attr1, attr2, py,
+                        width, height, renderWidth, renderHeight, eightBpp(attr0), semiTransparent, mask);
             } else {
-                renderObject(memory, oneDimensionalMapping, attr0, attr1, attr2, y, width, height, layerMasks);
+                gatherObjectLine(memory, oneDimensionalMapping, attr0, attr1, attr2, py,
+                        width, height, semiTransparent, mask);
             }
         }
     }
 
-    private void renderObject(
+    private void gatherObjectLine(
             AddressSpace memory,
             boolean oneDimensionalMapping,
             int attr0,
             int attr1,
             int attr2,
-            int y,
+            int py,
             int width,
             int height,
-            byte[] layerMasks) {
+            boolean semiTransparent,
+            byte[] mask) {
         int x = attr1 & 0x1FF;
         if (x >= 256) {
             x -= 512;
@@ -370,53 +522,38 @@ public final class GbaVideo {
             return;
         }
 
-        boolean eightBpp = (attr0 & (1 << 13)) != 0;
+        boolean eightBpp = eightBpp(attr0);
         boolean horizontalFlip = (attr1 & (1 << 12)) != 0;
         boolean verticalFlip = (attr1 & (1 << 13)) != 0;
         int tileNumber = attr2 & 0x3FF;
         int priority = (attr2 >>> 10) & 0x3;
         int paletteBank = (attr2 >>> 12) & 0xF;
+        int tileY = verticalFlip ? height - 1 - py : py;
 
-        for (int py = 0; py < height; py++) {
-            int screenY = y + py;
-            if (screenY < 0 || screenY >= HEIGHT) {
+        for (int px = 0; px < width; px++) {
+            int screenX = x + px;
+            if (screenX < 0 || screenX >= WIDTH || !objectLayerEnabled(mask, screenX)) {
                 continue;
             }
-            int tileY = verticalFlip ? height - 1 - py : py;
-            for (int px = 0; px < width; px++) {
-                int screenX = x + px;
-                if (screenX < 0 || screenX >= WIDTH) {
-                    continue;
-                }
-                int index = screenY * WIDTH + screenX;
-                if (!objectLayerEnabled(layerMasks, index)) {
-                    continue;
-                }
-                int tileX = horizontalFlip ? width - 1 - px : px;
-                int color = objectPixel(memory, oneDimensionalMapping, eightBpp, tileNumber, paletteBank, width, tileX, tileY);
-                if (color == TRANSPARENT) {
-                    continue;
-                }
-                if (priority <= priorities[index]) {
-                    framebuffer[index] = color;
-                    priorities[index] = priority;
-                }
-            }
+            int tileX = horizontalFlip ? width - 1 - px : px;
+            int color = objectPixel(memory, oneDimensionalMapping, eightBpp, tileNumber, paletteBank, width, tileX, tileY);
+            placeObjectPixel(screenX, color, priority, semiTransparent);
         }
     }
 
-    private void renderAffineObject(
+    private void gatherAffineObjectLine(
             AddressSpace memory,
             boolean oneDimensionalMapping,
-            int attr0,
             int attr1,
             int attr2,
-            int y,
+            int py,
             int textureWidth,
             int textureHeight,
             int renderWidth,
             int renderHeight,
-            byte[] layerMasks) {
+            boolean eightBpp,
+            boolean semiTransparent,
+            byte[] mask) {
         int x = attr1 & 0x1FF;
         if (x >= 256) {
             x -= 512;
@@ -431,7 +568,6 @@ public final class GbaVideo {
         int pb = signed16(memory.read16(base + 14));
         int pc = signed16(memory.read16(base + 22));
         int pd = signed16(memory.read16(base + 30));
-        boolean eightBpp = (attr0 & (1 << 13)) != 0;
         int tileNumber = attr2 & 0x3FF;
         int priority = (attr2 >>> 10) & 0x3;
         int paletteBank = (attr2 >>> 12) & 0xF;
@@ -439,51 +575,39 @@ public final class GbaVideo {
         int renderCenterY = renderHeight / 2;
         int textureCenterX = textureWidth / 2;
         int textureCenterY = textureHeight / 2;
+        int dy = py - renderCenterY;
 
-        for (int py = 0; py < renderHeight; py++) {
-            int screenY = y + py;
-            if (screenY < 0 || screenY >= HEIGHT) {
+        for (int px = 0; px < renderWidth; px++) {
+            int screenX = x + px;
+            if (screenX < 0 || screenX >= WIDTH || !objectLayerEnabled(mask, screenX)) {
                 continue;
             }
-            int dy = py - renderCenterY;
-            for (int px = 0; px < renderWidth; px++) {
-                int screenX = x + px;
-                if (screenX < 0 || screenX >= WIDTH) {
-                    continue;
-                }
-                int index = screenY * WIDTH + screenX;
-                if (!objectLayerEnabled(layerMasks, index)) {
-                    continue;
-                }
-
-                int dx = px - renderCenterX;
-                int textureX = ((pa * dx + pb * dy) >> 8) + textureCenterX;
-                int textureY = ((pc * dx + pd * dy) >> 8) + textureCenterY;
-                if (textureX < 0 || textureX >= textureWidth || textureY < 0 || textureY >= textureHeight) {
-                    continue;
-                }
-
-                int color = objectPixel(
-                        memory,
-                        oneDimensionalMapping,
-                        eightBpp,
-                        tileNumber,
-                        paletteBank,
-                        textureWidth,
-                        textureX,
-                        textureY);
-                if (color == TRANSPARENT) {
-                    continue;
-                }
-                if (priority <= priorities[index]) {
-                    framebuffer[index] = color;
-                    priorities[index] = priority;
-                }
+            int dx = px - renderCenterX;
+            int textureX = ((pa * dx + pb * dy) >> 8) + textureCenterX;
+            int textureY = ((pc * dx + pd * dy) >> 8) + textureCenterY;
+            if (textureX < 0 || textureX >= textureWidth || textureY < 0 || textureY >= textureHeight) {
+                continue;
             }
+            int color = objectPixel(memory, oneDimensionalMapping, eightBpp, tileNumber, paletteBank,
+                    textureWidth, textureX, textureY);
+            placeObjectPixel(screenX, color, priority, semiTransparent);
         }
     }
 
-    private byte[] activeWindowMasks(AddressSpace memory, int dispcnt) {
+    /// Keeps the front-most OBJ pixel per column (objects are scanned 127->0, so a lower
+    /// index wins ties via {@code priority <= objPriority}).
+    private void placeObjectPixel(int screenX, int color, int priority, boolean semiTransparent) {
+        if (color == TRANSPARENT) {
+            return;
+        }
+        if (objColor[screenX] == TRANSPARENT || priority <= objPriority[screenX]) {
+            objColor[screenX] = color;
+            objPriority[screenX] = priority;
+            objSemi[screenX] = semiTransparent;
+        }
+    }
+
+    private byte[] activeWindowMaskLine(AddressSpace memory, int dispcnt, int line) {
         int activeWindows = dispcnt & (WIN0_ENABLE | WIN1_ENABLE | OBJ_WINDOW_ENABLE);
         if (activeWindows == 0) {
             return null;
@@ -491,26 +615,24 @@ public final class GbaVideo {
 
         int winIn = memory.read16(WININ);
         int winOut = memory.read16(WINOUT);
-        int outsideMask = winOut & WINDOW_ALL_LAYERS;
-        int win0Mask = winIn & WINDOW_ALL_LAYERS;
-        int win1Mask = (winIn >>> 8) & WINDOW_ALL_LAYERS;
+        int outsideMask = winOut & (WINDOW_ALL_LAYERS | WINDOW_OBJ_ENABLE | WINDOW_BLEND_ENABLE);
+        int win0Mask = winIn & (WINDOW_ALL_LAYERS | WINDOW_OBJ_ENABLE | WINDOW_BLEND_ENABLE);
+        int win1Mask = (winIn >>> 8) & (WINDOW_ALL_LAYERS | WINDOW_OBJ_ENABLE | WINDOW_BLEND_ENABLE);
         int win0H = memory.read16(WIN0H);
         int win1H = memory.read16(WIN1H);
         int win0V = memory.read16(WIN0V);
         int win1V = memory.read16(WIN1V);
 
-        for (int y = 0; y < HEIGHT; y++) {
-            for (int x = 0; x < WIDTH; x++) {
-                int mask = outsideMask;
-                if ((dispcnt & WIN0_ENABLE) != 0 && inWindow(x, y, win0H, win0V)) {
-                    mask = win0Mask;
-                } else if ((dispcnt & WIN1_ENABLE) != 0 && inWindow(x, y, win1H, win1V)) {
-                    mask = win1Mask;
-                }
-                windowMasks[y * WIDTH + x] = (byte) mask;
+        for (int x = 0; x < WIDTH; x++) {
+            int maskValue = outsideMask;
+            if ((dispcnt & WIN0_ENABLE) != 0 && inWindow(x, line, win0H, win0V)) {
+                maskValue = win0Mask;
+            } else if ((dispcnt & WIN1_ENABLE) != 0 && inWindow(x, line, win1H, win1V)) {
+                maskValue = win1Mask;
             }
+            windowMaskLine[x] = (byte) maskValue;
         }
-        return windowMasks;
+        return windowMaskLine;
     }
 
     private static boolean inWindow(int x, int y, int horizontal, int vertical) {
@@ -530,12 +652,16 @@ public final class GbaVideo {
         return value >= start || value < end;
     }
 
-    private static boolean layerEnabled(byte[] layerMasks, int index, int layer) {
-        return layerMasks == null || (layerMasks[index] & (1 << layer)) != 0;
+    private static boolean layerEnabled(byte[] mask, int screenX, int layer) {
+        return mask == null || (mask[screenX] & (1 << layer)) != 0;
     }
 
-    private static boolean objectLayerEnabled(byte[] layerMasks, int index) {
-        return layerMasks == null || (layerMasks[index] & WINDOW_OBJ_ENABLE) != 0;
+    private static boolean objectLayerEnabled(byte[] mask, int screenX) {
+        return mask == null || (mask[screenX] & WINDOW_OBJ_ENABLE) != 0;
+    }
+
+    private static boolean eightBpp(int attr0) {
+        return (attr0 & (1 << 13)) != 0;
     }
 
     private static int objectPixel(
@@ -561,7 +687,7 @@ public final class GbaVideo {
         if (paletteIndex == 0) {
             return TRANSPARENT;
         }
-        return bgr555ToArgb(memory.read16(OBJ_PALETTE + paletteIndex * 2));
+        return memory.read16(OBJ_PALETTE + paletteIndex * 2) & 0x7FFF;
     }
 
     private static int signed16(int value) {
@@ -591,7 +717,7 @@ public final class GbaVideo {
             int pixelY) {
         int byteValue = memory.read8(charBase + tileNumber * 32 + pixelY * 4 + pixelX / 2);
         int colorIndex = (pixelX & 1) == 0 ? byteValue & 0xF : (byteValue >>> 4) & 0xF;
-        return colorIndex == 0 ? TRANSPARENT : paletteBank * 16 + colorIndex;
+        return colorIndex == 0 ? 0 : paletteBank * 16 + colorIndex;
     }
 
     private static int readTile8Bpp(AddressSpace memory, int charBase, int tileNumber, int pixelX, int pixelY) {

@@ -91,6 +91,30 @@ public final class GbaTimerController implements MemorySpace {
         return overflowCounts[timer];
     }
 
+    /// Serializes all timer state (registers + counters/reloads/accumulators) into a save state.
+    public void saveState(java.io.DataOutputStream out) throws java.io.IOException {
+        out.write(registers);
+        for (int i = 0; i < 4; i++) {
+            out.writeInt(counters[i]);
+            out.writeInt(reloads[i]);
+            out.writeInt(cycleAccumulators[i]);
+            out.writeInt(overflowCounts[i]);
+            out.writeBoolean(enabled[i]);
+        }
+    }
+
+    /// Restores all timer state from a save state.
+    public void loadState(java.io.DataInputStream in) throws java.io.IOException {
+        in.readFully(registers);
+        for (int i = 0; i < 4; i++) {
+            counters[i] = in.readInt();
+            reloads[i] = in.readInt();
+            cycleAccumulators[i] = in.readInt();
+            overflowCounts[i] = in.readInt();
+            enabled[i] = in.readBoolean();
+        }
+    }
+
     private void syncTimer(int timer, int newControl) {
         boolean nextEnabled = (newControl & ENABLE) != 0;
         if (!enabled[timer] && nextEnabled) {

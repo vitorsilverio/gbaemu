@@ -74,12 +74,34 @@ public final class GbaInterruptController implements MemorySpace {
         interruptFlags |= mask & 0x3FFF;
     }
 
+    /// Serializes IE/IF/IME into a save state.
+    public void saveState(java.io.DataOutputStream out) throws java.io.IOException {
+        out.writeInt(ie);
+        out.writeInt(interruptFlags);
+        out.writeInt(ime);
+    }
+
+    /// Restores IE/IF/IME from a save state.
+    public void loadState(java.io.DataInputStream in) throws java.io.IOException {
+        ie = in.readInt();
+        interruptFlags = in.readInt();
+        ime = in.readInt();
+    }
+
     public void acknowledge(int mask) {
         clearInterruptFlags(mask & 0x3FFF);
     }
 
     public boolean pending() {
         return (ime & 1) != 0 && (ie & interruptFlags & 0x3FFF) != 0;
+    }
+
+    /// True when an enabled interrupt within `mask` has been requested (regardless of IME).
+    /// `IntrWait`/`VBlankIntrWait` use this to detect that the specific awaited interrupt
+    /// actually fired, so the wait returns to the game only then — while still waking on any
+    /// IRQ in between to service unrelated handlers (e.g. a VCount raster effect) mid-frame.
+    public boolean requestedWithin(int mask) {
+        return (ie & interruptFlags & mask & 0x3FFF) != 0;
     }
 
     private void clearInterruptFlags(int mask) {

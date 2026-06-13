@@ -55,6 +55,7 @@ public final class GbaBiosSwi {
     private static final int SWI_SOUND_DRIVER_VSYNC_ON = 0x29;
     private static final int SWI_SOUND_GET_JUMP_LIST = 0x2A;
 
+    private static final int IRQ_VBLANK_MASK = 0x0001; // REG_IF bit 0 = VBlank
     private static final int ROM_ENTRY_POINT = 0x08000000;
     private static final int MULTIBOOT_ENTRY_POINT = 0x02000000;
     private static final int SOFT_RESET_FLAG = 0x03007FFA;
@@ -62,6 +63,7 @@ public final class GbaBiosSwi {
     private static final int DEBUG_EVENT_LIMIT = 96;
     private static final int[] CALL_COUNTS = new int[SWI_SOUND_GET_JUMP_LIST + 1];
     private static final List<String> DEBUG_EVENTS = new ArrayList<>();
+    private static final java.util.Set<Integer> UNKNOWN_SWIS = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
 
     private GbaBiosSwi() {
@@ -73,8 +75,8 @@ public final class GbaBiosSwi {
         register(dispatcher, SWI_REGISTER_RAM_RESET, state -> registerRamReset(memory, state));
         register(dispatcher, SWI_HALT, state -> halt(systemControl, state));
         register(dispatcher, SWI_STOP, state -> stop(systemControl, state));
-        register(dispatcher, SWI_INTR_WAIT, state -> waitForInterrupt(systemControl, state));
-        register(dispatcher, SWI_VBLANK_INTR_WAIT, state -> waitForInterrupt(systemControl, state));
+        register(dispatcher, SWI_INTR_WAIT, state -> intrWait(systemControl, state));
+        register(dispatcher, SWI_VBLANK_INTR_WAIT, state -> vblankIntrWait(systemControl, state));
         register(dispatcher, SWI_DIV, GbaBiosSwi::div);
         register(dispatcher, SWI_DIV_ARM, GbaBiosSwi::divArm);
         register(dispatcher, SWI_SQRT, GbaBiosSwi::sqrt);
@@ -100,7 +102,7 @@ public final class GbaBiosSwi {
         register(dispatcher, SWI_SOUND_DRIVER_MAIN, GbaBiosSwi::returnUnchanged);
         register(dispatcher, SWI_SOUND_DRIVER_VSYNC, GbaBiosSwi::returnUnchanged);
         register(dispatcher, SWI_SOUND_CHANNEL_CLEAR, state -> soundChannelClear(memory, state));
-        register(dispatcher, SWI_MIDI_KEY_2_FRAME, GbaBiosSwi::midiKeyToFrequency);
+        register(dispatcher, SWI_MIDI_KEY_2_FRAME, state -> midiKeyToFrequency(memory, state));
         register(dispatcher, SWI_SOUND_WHATEVER_0, GbaBiosSwi::returnUnchanged);
         register(dispatcher, SWI_SOUND_WHATEVER_1, GbaBiosSwi::returnUnchanged);
         register(dispatcher, SWI_SOUND_WHATEVER_2, GbaBiosSwi::returnUnchanged);
@@ -119,8 +121,13 @@ public final class GbaBiosSwi {
                         ? dispatcher.dispatch(thumbSwi, state)
                         : state;
             }
-            throw new UnsupportedOperationException("GBA BIOS SWI not implemented: 0x"
-                    + Integer.toHexString(swi));
+            // Unknown SWI: never crash the whole emulator. A game that has jumped into garbage
+            // (or a SWI we genuinely don't HLE yet) must not take the app down. Log each distinct
+            // number once and continue with the CPU state unchanged.
+            if (UNKNOWN_SWIS.add(swi)) {
+                System.err.println("GBA BIOS SWI not implemented (ignored): 0x" + Integer.toHexString(swi));
+            }
+            return state;
         });
         return dispatcher;
     }
@@ -170,9 +177,43 @@ public final class GbaBiosSwi {
         return state;
     }
 
-    private static CpuState waitForInterrupt(GbaSystemControl systemControl, CpuState state) {
-        systemControl.writeHaltControl(0);
-        return state.withR0(0);
+    /// VBlankIntrWait: return to the caller only after the next VBlank, while still servicing
+    /// any other interrupts (e.g. a per-frame VCount raster handler) in between.
+    private static CpuState vblankIntrWait(GbaSystemControl systemControl, CpuState state) {
+        return intrWaitFor(systemControl, state, IRQ_VBLANK_MASK);
+    }
+
+    /// IntrWait: return only after one of the interrupts requested in r1 fires. r0 (discard
+    /// old flags) is not modelled — the wait always blocks until a fresh matching interrupt.
+    /// A zero mask falls back to a plain "wake on any" HALT.
+    private static CpuState intrWait(GbaSystemControl systemControl, CpuState state) {
+        int mask = state.r1() & 0x3FFF;
+        if (mask == 0) {
+            systemControl.writeHaltControl(0);
+            return state.withR0(0);
+        }
+        return intrWaitFor(systemControl, state, mask);
+    }
+
+    /// Faithful BIOS IntrWait loop, HLE-style: the CPU wakes on ANY interrupt (so unrelated
+    /// handlers run mid-frame), but we only return to the caller once one of `mask` has fired.
+    /// While waiting we halt and rewind PC to re-execute this SWI, so each interrupt that
+    /// wakes the halt re-enters here and re-checks — exactly like the real BIOS HALT loop.
+    /// `advanceHalted` sets the satisfied flag when an awaited interrupt is actually requested.
+    private static CpuState intrWaitFor(GbaSystemControl systemControl, CpuState state, int mask) {
+        if (systemControl.intrWaitSatisfied() && systemControl.intrWaitMask() == mask) {
+            systemControl.endIntrWait();
+            return state.withR0(0);
+        }
+        systemControl.beginIntrWait(mask);
+        return rewindToSwi(state);
+    }
+
+    /// Rewinds PC back onto the SWI instruction so it re-executes after the halt is woken
+    /// (the dispatcher advanced PC past the SWI before calling us). THUMB SWIs are 2 bytes.
+    private static CpuState rewindToSwi(CpuState state) {
+        boolean thumb = (state.cpsr() & 0x20) != 0;
+        return state.withPc(state.pc() - (thumb ? 2 : 4));
     }
 
     private static CpuState returnUnchanged(CpuState state) {
@@ -320,11 +361,15 @@ public final class GbaBiosSwi {
         int source = state.r0();
         int destination = state.r1();
         int count = state.r2();
+        // Byte distance between PA/PB/PC/PD in the destination: 2 for a packed array,
+        // 8 for OAM (where the matrix is interleaved with the OBJ attributes). Games
+        // pass this in bytes, so PA..PD go at dst + 0/offset/2*offset/3*offset and the
+        // next matrix starts 4*offset later.
         int offset = state.r3();
 
         for (int i = 0; i < count; i++) {
             int sourceBase = source + i * 6;
-            int destinationBase = destination + i * offset * 8;
+            int destinationBase = destination + i * offset * 4;
             int scaleX = signed16(memory.read16(sourceBase));
             int scaleY = signed16(memory.read16(sourceBase + 2));
             int angle = memory.read16(sourceBase + 4) & 0xFFFF;
@@ -338,9 +383,9 @@ public final class GbaBiosSwi {
             int pd = (cos * scaleY) >> 8;
 
             memory.write16(destinationBase, pa);
-            memory.write16(destinationBase + offset * 2, pb);
-            memory.write16(destinationBase + offset * 4, pc);
-            memory.write16(destinationBase + offset * 6, pd);
+            memory.write16(destinationBase + offset, pb);
+            memory.write16(destinationBase + offset * 2, pc);
+            memory.write16(destinationBase + offset * 3, pd);
         }
         return state;
     }
@@ -569,8 +614,18 @@ public final class GbaBiosSwi {
         return state;
     }
 
-    private static CpuState midiKeyToFrequency(CpuState state) {
-        return state.withR0(0);
+    /// MidiKey2Freq (SWI 0x1F): the M4A sound engine uses this to turn a MIDI key + fine
+    /// adjustment into the playback frequency for a melodic voice. r0 points at a WaveData
+    /// struct whose base frequency is at offset 4. Result (r0) = freq / 2^((180 - key -
+    /// fineAdjust/256) / 12). The previous stub returned 0, so every pitched note was silent
+    /// (only unpitched percussion played) — e.g. Metroid Fusion's music.
+    private static CpuState midiKeyToFrequency(AddressSpace memory, CpuState state) {
+        long waveFrequency = memory.read32(state.r0() + 4) & 0xFFFF_FFFFL;
+        int key = state.r1() & 0xFF;
+        int fineAdjust = state.r2() & 0xFF;
+        double divisor = Math.pow(2.0, (180.0 - key - fineAdjust / 256.0) / 12.0);
+        long frequency = (long) (waveFrequency / divisor);
+        return state.withR0((int) frequency);
     }
 
     private static void writeDecompressed(AddressSpace memory, int destination, byte[] output, boolean vram) {

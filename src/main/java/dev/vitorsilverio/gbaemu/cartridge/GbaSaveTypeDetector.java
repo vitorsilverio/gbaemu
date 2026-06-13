@@ -29,7 +29,20 @@ public final class GbaSaveTypeDetector {
         if (contains(rom, SRAM)) {
             return GbaSaveType.SRAM;
         }
-        return GbaSaveType.NONE;
+        return overrideByGameCode(rom);
+    }
+
+    /// A few commercial ROMs ship without the ASCII save-type ID string and rely on the console
+    /// (really, an emulator database) knowing their save chip from the 4-char game code at 0xAC.
+    private static GbaSaveType overrideByGameCode(byte[] rom) {
+        if (rom.length < 0xB0) {
+            return GbaSaveType.NONE;
+        }
+        String code = new String(rom, 0xAC, 4, StandardCharsets.US_ASCII);
+        return switch (code) {
+            case "A2CE" -> GbaSaveType.SRAM; // Castlevania: Aria of Sorrow (no marker) uses SRAM
+            default -> GbaSaveType.NONE;
+        };
     }
 
     private static boolean contains(byte[] data, byte[] needle) {
