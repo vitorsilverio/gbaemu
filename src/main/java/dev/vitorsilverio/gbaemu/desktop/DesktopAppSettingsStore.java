@@ -23,6 +23,7 @@ public final class DesktopAppSettingsStore {
     private static final String MP_TCP_HOST = "multiplayerTcpHost";
     private static final String MP_TCP_PORT = "multiplayerTcpPort";
     private static final String MP_HOST_MODE = "multiplayerHostMode";
+    private static final String CPU_BACKEND = "cpuBackend";
 
     private DesktopAppSettingsStore() {
     }
@@ -60,7 +61,8 @@ public final class DesktopAppSettingsStore {
                 gamepad,
                 preferences.get(MP_TCP_HOST, defaults.multiplayerTcpHost()),
                 preferences.getInt(MP_TCP_PORT, defaults.multiplayerTcpPort()),
-                preferences.getBoolean(MP_HOST_MODE, defaults.multiplayerHostMode())).normalized();
+                preferences.getBoolean(MP_HOST_MODE, defaults.multiplayerHostMode()),
+                parseCpuBackend(preferences.get(CPU_BACKEND, defaults.cpuBackend().name()))).normalized();
     }
 
     public static void save(Preferences preferences, AppSettings settings) {
@@ -86,6 +88,15 @@ public final class DesktopAppSettingsStore {
         preferences.put(MP_TCP_HOST, normalized.multiplayerTcpHost());
         preferences.putInt(MP_TCP_PORT, normalized.multiplayerTcpPort());
         preferences.putBoolean(MP_HOST_MODE, normalized.multiplayerHostMode());
+        preferences.put(CPU_BACKEND, normalized.cpuBackend().name());
+    }
+
+    private static AppSettings.CpuBackend parseCpuBackend(String value) {
+        try {
+            return AppSettings.CpuBackend.valueOf(value);
+        } catch (IllegalArgumentException ignored) {
+            return AppSettings.CpuBackend.INTERPRETED;
+        }
     }
 
     private static AppSettings.BootMode parseBootMode(String value) {

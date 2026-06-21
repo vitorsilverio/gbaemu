@@ -40,6 +40,8 @@ public final class SettingsDialog extends JDialog {
     private final JCheckBox debugVideo = new JCheckBox("Log video frame stats");
     private final JComboBox<AppSettings.BootMode> bootMode =
             new JComboBox<>(AppSettings.BootMode.values());
+    private final JComboBox<AppSettings.CpuBackend> cpuBackend =
+            new JComboBox<>(AppSettings.CpuBackend.values());
     private final JTextField biosPath = new JTextField(24);
 
     private final KeyCaptureButton[] controllerKeys = new KeyCaptureButton[AppSettings.BUTTON_COUNT];
@@ -57,6 +59,7 @@ public final class SettingsDialog extends JDialog {
         scanlineRendering.setSelected(settings.scanlineRendering());
         debugVideo.setSelected(settings.debugVideo());
         bootMode.setSelectedItem(settings.bootMode());
+        cpuBackend.setSelectedItem(settings.cpuBackend());
         biosPath.setText(settings.biosPath());
 
         AppSettings.GamepadConfig pad = settings.gamepadConfig();
@@ -113,6 +116,7 @@ public final class SettingsDialog extends JDialog {
         addRow(form, constraints, row++, new JLabel("Window scale"), scaleSpinner);
         addRow(form, constraints, row++, new JLabel("Boot mode"), bootMode);
         addRow(form, constraints, row++, new JLabel("BIOS file"), biosFileChooser());
+        addRow(form, constraints, row++, new JLabel("CPU backend"), cpuBackend);
         addWide(form, constraints, row++, muteAudio);
         addWide(form, constraints, row++, scanlineRendering);
         addWide(form, constraints, row++, debugVideo);
@@ -241,7 +245,8 @@ public final class SettingsDialog extends JDialog {
                 gamepad,
                 base.multiplayerTcpHost(),
                 base.multiplayerTcpPort(),
-                base.multiplayerHostMode()).normalized();
+                base.multiplayerHostMode(),
+                (AppSettings.CpuBackend) cpuBackend.getSelectedItem()).normalized();
     }
 
     private void addRow(JPanel form, GridBagConstraints constraints, int row, JLabel label, java.awt.Component field) {

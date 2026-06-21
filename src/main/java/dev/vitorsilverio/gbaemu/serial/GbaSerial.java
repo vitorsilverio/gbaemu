@@ -24,18 +24,31 @@ public final class GbaSerial implements MemorySpace, SerialLinkListener {
     private static final int RCNT_END = 0x04000137;
 
     private static final int ABSENT = 0xFFFF;
+    private static final int OPEN_BUS_32 = 0xFFFFFFFF; // SIODATA32 read when nothing drove the line
     // SIOCNT bits the game owns: baud (0-1), transfer mode (12-13) and the completion IRQ (14).
     // The start/busy bit 7 and the status bits 2-6 are managed here, not stored.
     private static final int SIOCNT_CONTROL_MASK = 0x7003;
     private static final int START = 0x80;
     private static final int IRQ_ENABLE = 0x4000;
+    // Normal-mode SIOCNT clock bits: bit0 selects the shift clock (0=external/slave, 1=internal/
+    // master), bit1 the internal clock rate (0=~256 kHz, 1=~2 MHz).
+    private static final int NORMAL_INTERNAL_CLOCK = 0x01;
+    private static final int NORMAL_FAST_CLOCK = 0x02;
     // Generous safety timeout so a child never hangs forever if the parent stops driving.
     private static final int CHILD_TIMEOUT_CYCLES = 280_896 * 8;
+    // How long a connected Normal-mode master waits for the slave's response before giving up and
+    // reading open-bus (the peer may not be in Normal mode). ~6 ms — far longer than a local
+    // round-trip, but short enough not to stall the game when the peer never answers.
+    private static final int NORMAL_LINK_TIMEOUT_CYCLES = 100_000;
+    // Opt-in tracing (`-Dgba.serial.debug=true`) for diagnosing what the BIOS/game does with SIO.
+    private static final boolean DEBUG = Boolean.getBoolean("gba.serial.debug");
 
-    private enum Phase { IDLE, HOST_PENDING, SOLO_PENDING, CHILD_WAIT }
+    private enum Phase {
+        IDLE, HOST_PENDING, SOLO_PENDING, CHILD_WAIT, NORMAL_PENDING, NORMAL_SLAVE_WAIT, NORMAL_MASTER_WAIT
+    }
 
     private final GbaInterruptController interrupts;
-    private final GbaLink link;
+    private GbaLink link;
 
     private final int[] siomulti = {ABSENT, ABSENT, ABSENT, ABSENT};
     private int siocntControl;
@@ -47,6 +60,8 @@ public final class GbaSerial implements MemorySpace, SerialLinkListener {
     private Phase phase = Phase.IDLE;
     private int transferCyclesRemaining;
     private int childTimeoutRemaining;
+    private int dbgLastSiocntRead = Integer.MIN_VALUE;
+    private int dbgLastRcntRead = Integer.MIN_VALUE;
 
     public GbaSerial(GbaInterruptController interrupts) {
         this.interrupts = interrupts;
@@ -57,6 +72,16 @@ public final class GbaSerial implements MemorySpace, SerialLinkListener {
     /// The link broker; the desktop app uses it to host/join/disconnect a session.
     public GbaLink link() {
         return link;
+    }
+
+    /// Replaces this peripheral's link with a shared, app-owned one. The GBA link cable is a
+    /// physical connection that exists independent of any game, so the desktop app owns a single
+    /// {@link GbaLink} ("the cable") and hands it to every console it boots — the live connection
+    /// then persists across ROM loads/restarts. Re-points the link's serial listener here so the
+    /// freshly-booted game sees the cable from its first cycle.
+    public void adoptLink(GbaLink sharedLink) {
+        this.link = sharedLink;
+        sharedLink.attachSerial(this);
     }
 
     @Override
@@ -71,7 +96,7 @@ public final class GbaSerial implements MemorySpace, SerialLinkListener {
 
     @Override
     public int readHalfWord(int address) {
-        return switch (address & ~1) {
+        int result = switch (address & ~1) {
             case SIO_BASE -> siomulti[0];
             case SIO_BASE + 2 -> siomulti[1];
             case SIO_BASE + 4 -> siomulti[2];
@@ -81,6 +106,10 @@ public final class GbaSerial implements MemorySpace, SerialLinkListener {
             case RCNT -> rcnt;
             default -> 0;
         };
+        if (DEBUG) {
+            debugRead(address & ~1, result);
+        }
+        return result;
     }
 
     @Override
@@ -99,6 +128,9 @@ public final class GbaSerial implements MemorySpace, SerialLinkListener {
     @Override
     public void writeHalfWord(int address, int value) {
         value &= 0xFFFF;
+        if (DEBUG) {
+            System.err.printf("[serial] write 0x%07X = 0x%04X%n", address & ~1, value);
+        }
         switch (address & ~1) {
             case SIO_BASE -> siomulti[0] = value;     // SIODATA32 low (normal 32-bit send)
             case SIO_BASE + 2 -> siomulti[1] = value; // SIODATA32 high
@@ -134,12 +166,25 @@ public final class GbaSerial implements MemorySpace, SerialLinkListener {
                     completePending();
                 }
             }
+            case NORMAL_PENDING -> {
+                transferCyclesRemaining -= cycles;
+                if (transferCyclesRemaining <= 0) {
+                    completeNormal(OPEN_BUS_32); // nothing attached → open-bus
+                }
+            }
+            case NORMAL_MASTER_WAIT -> {
+                transferCyclesRemaining -= cycles;
+                if (transferCyclesRemaining <= 0) {
+                    completeNormal(OPEN_BUS_32); // peer never responded → open-bus
+                }
+            }
             case CHILD_WAIT -> {
                 childTimeoutRemaining -= cycles;
                 if (childTimeoutRemaining <= 0) {
                     completeMultiplayer(failWords(), link.localId());
                 }
             }
+            // NORMAL_SLAVE_WAIT: no external clock attached → stays busy, never completes (no IRQ).
             default -> {
             }
         }
@@ -147,15 +192,42 @@ public final class GbaSerial implements MemorySpace, SerialLinkListener {
 
     @Override
     public void onMultiplayerResult(int[] words) {
-        if (transferActive && phase == Phase.CHILD_WAIT) {
-            completeMultiplayer(words, link.localId());
+        // A parent-driven transfer reached this unit. On real hardware a child receives the data
+        // AND a SERIAL IRQ on *every* parent transfer, whether or not it set the start bit —
+        // children are reactive, the parent drives. So always complete here (latch SIOMULTI0-3,
+        // learn our id, raise the IRQ), not only when the child explicitly armed a CHILD_WAIT.
+        // (Earlier code raised no IRQ for an un-armed child, which hung games whose child code
+        // waits on the serial interrupt — e.g. Mario Kart's link screen.) Ignore results that
+        // arrive while not in multiplayer mode, since SIOMULTI0-3 alias SIODATA32 there.
+        if (!isMultiplayerMode()) {
             return;
         }
-        // Result arrived without an armed transfer: keep SIOMULTI fresh, but raise no IRQ.
-        for (int i = 0; i < 4; i++) {
-            siomulti[i] = words[i] & 0xFFFF;
+        completeMultiplayer(words, link.localId());
+    }
+
+    @Override
+    public void onNormalRequest(int data) {
+        // The peer is the Normal-mode master and is driving a transfer; we are the slave. Real
+        // hardware exchanges both words simultaneously, so send our outgoing word back and latch
+        // the master's. An armed slave (it wrote the start bit) completes its transfer + IRQ; an
+        // un-armed unit just keeps SIODATA fresh (no IRQ) — only meaningful in Normal mode.
+        if (!isNormalMode()) {
+            return;
         }
-        lastId = link.localId();
+        link.sendNormalResponse(normalOutgoing());
+        if (transferActive && phase == Phase.NORMAL_SLAVE_WAIT) {
+            completeNormal(data);
+        } else {
+            latchNormalReceived(data);
+        }
+    }
+
+    @Override
+    public void onNormalResponse(int data) {
+        // The peer (our slave) answered the transfer we drove as Normal-mode master.
+        if (transferActive && phase == Phase.NORMAL_MASTER_WAIT) {
+            completeNormal(data);
+        }
     }
 
     @Override
@@ -174,6 +246,10 @@ public final class GbaSerial implements MemorySpace, SerialLinkListener {
     }
 
     private void beginTransfer() {
+        if (DEBUG) {
+            System.err.printf("[serial] beginTransfer siocnt=0x%04X mode=%d mp=%b normal=%b connected=%b%n",
+                    siocntControl, subMode(), isMultiplayerMode(), isNormalMode(), link.isConnected());
+        }
         if (isMultiplayerMode()) {
             beginMultiplayer();
         } else if (isNormalMode()) {
@@ -194,13 +270,68 @@ public final class GbaSerial implements MemorySpace, SerialLinkListener {
     }
 
     private void beginNormal() {
-        // Nothing connected: a normal-mode master reads back open-bus (0xFFFF.....) and finishes.
-        // Connected normal mode (the wireless adapter / RFU) is a future increment.
-        siomulti[0] = ABSENT;
-        siomulti[1] = ABSENT;
+        transferActive = true;
+        if ((siocntControl & NORMAL_INTERNAL_CLOCK) != 0) {
+            // Master (internal shift clock). With a peer attached, drive the transfer over the
+            // link and wait for its response (timeout falls back to open-bus if it never answers,
+            // e.g. the peer is not in Normal mode). With nothing attached the line reads open-bus
+            // after the bit time — never instantaneous, or a master re-issuing from its serial
+            // handler never yields the CPU.
+            if (link.isConnected()) {
+                // Set the waiting phase BEFORE sending: a synchronous transport (the in-memory
+                // test pair) delivers the slave's response reentrantly inside sendNormalRequest,
+                // and onNormalResponse only completes when the phase is already NORMAL_MASTER_WAIT.
+                phase = Phase.NORMAL_MASTER_WAIT;
+                transferCyclesRemaining = NORMAL_LINK_TIMEOUT_CYCLES;
+                link.sendNormalRequest(normalOutgoing());
+            } else {
+                phase = Phase.NORMAL_PENDING;
+                transferCyclesRemaining = normalTransferCycles();
+            }
+        } else {
+            // Slave (external shift clock): the transfer completes only when a master drives it
+            // (an incoming Normal request over the link, see onNormalRequest). With nothing
+            // attached the clock never arrives, so it stays busy forever and raises NO interrupt —
+            // exactly like real hardware. This is critical at boot: the GBA BIOS probes for a
+            // multiboot host with repeated slave-mode transfers; completing them instantly + IRQ
+            // storms the CPU so the BIOS never times out to boot the cart (every game black-screened).
+            phase = Phase.NORMAL_SLAVE_WAIT;
+        }
+    }
+
+    /// Completes a Normal-mode transfer, latching {@code received} into SIODATA (32-bit) or
+    /// SIODATA8 (8-bit). {@code 0xFFFFFFFF} is the open-bus value read when nothing responded.
+    private void completeNormal(int received) {
+        latchNormalReceived(received);
         transferActive = false;
         phase = Phase.IDLE;
         requestIrq();
+    }
+
+    /// This unit's outgoing Normal-mode word: SIODATA32 (0x120-0x123) in 32-bit mode, the low byte
+    /// of SIODATA8 (0x12A) in 8-bit mode.
+    private int normalOutgoing() {
+        if (subMode() == 1) {
+            return (siomulti[0] & 0xFFFF) | (siomulti[1] << 16);
+        }
+        return siomltSend & 0xFF;
+    }
+
+    private void latchNormalReceived(int received) {
+        if (subMode() == 1) {
+            siomulti[0] = received & 0xFFFF;
+            siomulti[1] = (received >>> 16) & 0xFFFF;
+        } else {
+            siomltSend = received & 0xFF;
+        }
+    }
+
+    /// Bit time of a Normal-mode transfer: 8 or 32 bits at the selected internal clock (bit1:
+    /// 0 = ~256 kHz, 1 = ~2 MHz). Approximate — it only needs to be non-zero so the CPU advances.
+    private int normalTransferCycles() {
+        int bits = subMode() == 1 ? 32 : 8; // mode 0 = Normal 8-bit, mode 1 = Normal 32-bit
+        int cyclesPerBit = (siocntControl & NORMAL_FAST_CLOCK) != 0 ? 8 : 64;
+        return bits * cyclesPerBit;
     }
 
     private void completePending() {
@@ -274,6 +405,20 @@ public final class GbaSerial implements MemorySpace, SerialLinkListener {
     private void requestIrq() {
         if (interrupts != null && (siocntControl & IRQ_ENABLE) != 0) {
             interrupts.request(GbaInterrupt.SERIAL);
+            if (DEBUG) {
+                System.err.println("[serial] SERIAL IRQ raised");
+            }
+        }
+    }
+
+    private void debugRead(int aligned, int result) {
+        if (aligned == SIOCNT && result != dbgLastSiocntRead) {
+            dbgLastSiocntRead = result;
+            System.err.printf("[serial] read SIOCNT=0x%04X (mode=%d, mp=%b, normal=%b)%n",
+                    result, subMode(), isMultiplayerMode(), isNormalMode());
+        } else if (aligned == RCNT && result != dbgLastRcntRead) {
+            dbgLastRcntRead = result;
+            System.err.printf("[serial] read RCNT=0x%04X (sioMode=%b)%n", result, isSioMode());
         }
     }
 

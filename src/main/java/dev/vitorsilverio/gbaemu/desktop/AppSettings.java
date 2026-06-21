@@ -27,7 +27,8 @@ public record AppSettings(
         GamepadConfig gamepadConfig,
         String multiplayerTcpHost,
         int multiplayerTcpPort,
-        boolean multiplayerHostMode) {
+        boolean multiplayerHostMode,
+        CpuBackend cpuBackend) {
 
     public static final int CHANNEL_COUNT = 6;
     public static final int MIN_SCALE = 1;
@@ -43,6 +44,25 @@ public record AppSettings(
     /// a comma-separated list of input4j component tokens (e.g. {@code "A,CROSS,BUTTON_0"};
     /// axis tokens carry a {@code +}/{@code -} suffix). {@code deviceIndex < 0} disables the pad.
     public record GamepadConfig(int deviceIndex, String deviceName, int deadzonePercent, String[] mappings) {
+    }
+
+    /// Which CPU backend the console uses. Changing this requires a ROM reload.
+    ///
+    /// {@link #INTERPRETED} is the default: it is fast enough for full speed and never stalls.
+    /// {@link #JIT} compiles hot blocks to JVM bytecode for higher peak performance, at the cost
+    /// of occasional compilation hitches.
+    public enum CpuBackend {
+        INTERPRETED("Interpreted"),
+        JIT("JIT (JVM bytecode)");
+
+        private final String label;
+
+        CpuBackend(String label) { this.label = label; }
+
+        public String label() { return label; }
+
+        @Override
+        public String toString() { return label; }
     }
 
     /// How the console boots, and whether a BIOS image is used at all.
@@ -72,12 +92,13 @@ public record AppSettings(
         }
     }
 
-    /// Convenience constructor that defaults the controller, gamepad and multiplayer fields.
+    /// Convenience constructor that defaults the controller, gamepad, multiplayer and CPU backend fields.
     /// Kept for call sites and tests that only set the video/audio preferences.
     public AppSettings(int scale, boolean muteAudio, boolean scanlineRendering, boolean debugVideo,
                        String biosPath, BootMode bootMode, int[] channelVolumes, boolean[] channelMuted) {
         this(scale, muteAudio, scanlineRendering, debugVideo, biosPath, bootMode, channelVolumes, channelMuted,
-                defaultControllerKeyCodes(), defaultGamepadConfig(), DEFAULT_TCP_HOST, DEFAULT_TCP_PORT, true);
+                defaultControllerKeyCodes(), defaultGamepadConfig(), DEFAULT_TCP_HOST, DEFAULT_TCP_PORT, true,
+                CpuBackend.INTERPRETED);
     }
 
     public static AppSettings defaults() {
@@ -96,7 +117,8 @@ public record AppSettings(
                 defaultGamepadConfig(),
                 DEFAULT_TCP_HOST,
                 DEFAULT_TCP_PORT,
-                true);
+                true,
+                CpuBackend.INTERPRETED);
     }
 
     /// Returns a copy with array fields defensively cloned and every value clamped to a
@@ -127,7 +149,8 @@ public record AppSettings(
                 normalizeGamepadConfig(gamepadConfig),
                 isBlank(multiplayerTcpHost) ? DEFAULT_TCP_HOST : multiplayerTcpHost.trim(),
                 clamp(multiplayerTcpPort, 1, 65535),
-                multiplayerHostMode);
+                multiplayerHostMode,
+                cpuBackend == null ? CpuBackend.INTERPRETED : cpuBackend);
     }
 
     public int channelVolume(int channelOneBased) {
@@ -146,7 +169,7 @@ public record AppSettings(
     public AppSettings withScale(int newScale) {
         return new AppSettings(newScale, muteAudio, scanlineRendering, debugVideo, biosPath, bootMode,
                 channelVolumes.clone(), channelMuted.clone(), controllerKeyCodes.clone(), gamepadConfig,
-                multiplayerTcpHost, multiplayerTcpPort, multiplayerHostMode);
+                multiplayerTcpHost, multiplayerTcpPort, multiplayerHostMode, cpuBackend);
     }
 
     public AppSettings withChannelVolume(int channelOneBased, int percent) {
@@ -154,7 +177,7 @@ public record AppSettings(
         copy[channelOneBased - 1] = clamp(percent, 0, 100);
         return new AppSettings(scale, muteAudio, scanlineRendering, debugVideo, biosPath, bootMode,
                 copy, channelMuted.clone(), controllerKeyCodes.clone(), gamepadConfig,
-                multiplayerTcpHost, multiplayerTcpPort, multiplayerHostMode);
+                multiplayerTcpHost, multiplayerTcpPort, multiplayerHostMode, cpuBackend);
     }
 
     public AppSettings withChannelMuted(int channelOneBased, boolean muted) {
@@ -162,13 +185,13 @@ public record AppSettings(
         copy[channelOneBased - 1] = muted;
         return new AppSettings(scale, muteAudio, scanlineRendering, debugVideo, biosPath, bootMode,
                 channelVolumes.clone(), copy, controllerKeyCodes.clone(), gamepadConfig,
-                multiplayerTcpHost, multiplayerTcpPort, multiplayerHostMode);
+                multiplayerTcpHost, multiplayerTcpPort, multiplayerHostMode, cpuBackend);
     }
 
     public AppSettings withMultiplayer(String tcpHost, int tcpPort, boolean hostMode) {
         return new AppSettings(scale, muteAudio, scanlineRendering, debugVideo, biosPath, bootMode,
                 channelVolumes.clone(), channelMuted.clone(), controllerKeyCodes.clone(), gamepadConfig,
-                tcpHost, tcpPort, hostMode);
+                tcpHost, tcpPort, hostMode, cpuBackend);
     }
 
     private static int[] defaultControllerKeyCodes() {

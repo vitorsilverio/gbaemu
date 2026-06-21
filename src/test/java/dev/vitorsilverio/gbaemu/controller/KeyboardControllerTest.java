@@ -42,7 +42,7 @@ class KeyboardControllerTest {
                 defaults.scale(), defaults.muteAudio(), defaults.scanlineRendering(), defaults.debugVideo(),
                 defaults.biosPath(), defaults.bootMode(), defaults.channelVolumes(), defaults.channelMuted(),
                 keys, defaults.gamepadConfig(), defaults.multiplayerTcpHost(), defaults.multiplayerTcpPort(),
-                defaults.multiplayerHostMode()).normalized();
+                defaults.multiplayerHostMode(), defaults.cpuBackend()).normalized();
 
         KeyboardController controller = new KeyboardController(rebound);
         assertTrue(controller.setKey(KeyEvent.VK_Q, true));

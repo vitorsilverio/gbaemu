@@ -21,6 +21,7 @@ class GbaSerialTest {
 
     private static final int MODE_MULTIPLAYER = 2 << 12;
     private static final int MODE_NORMAL8 = 0;
+    private static final int NORMAL_INTERNAL_CLOCK = 0x01;
     private static final int START = 0x80;
     private static final int IRQ_ENABLE = 0x4000;
 
@@ -70,15 +71,33 @@ class GbaSerialTest {
     }
 
     @Test
-    void normalModeCompletesAsDisconnected() {
+    void normalMasterTransferCompletesAfterItsTimeWithOpenBus() {
         Ctx ctx = create();
         ctx.serial.writeHalfWord(RCNT, 0);
-        ctx.serial.writeHalfWord(SIOCNT, MODE_NORMAL8 | IRQ_ENABLE | START);
+        // Normal 8-bit, internal clock (master, bit0=1), IRQ enabled, start.
+        ctx.serial.writeHalfWord(SIOCNT, MODE_NORMAL8 | NORMAL_INTERNAL_CLOCK | IRQ_ENABLE | START);
 
-        // Normal mode with nothing attached finishes immediately with open-bus data.
+        assertNotEquals(0, ctx.serial.readHalfWord(SIOCNT) & START, "busy until the bit time elapses");
+        ctx.serial.tick(10_000);
+
+        // Nothing attached: the master shifts in open-bus 0xFFFF, then completes and raises the IRQ.
         assertEquals(0xFFFF, ctx.serial.readHalfWord(SIOMULTI0));
-        assertEquals(0, ctx.serial.readHalfWord(SIOCNT) & START);
+        assertEquals(0, ctx.serial.readHalfWord(SIOCNT) & START, "start/busy clears on completion");
         assertTrue(serialIrqRaised(ctx.interrupts));
+    }
+
+    @Test
+    void normalSlaveTransferWithNothingAttachedStaysBusyAndRaisesNoIrq() {
+        Ctx ctx = create();
+        ctx.serial.writeHalfWord(RCNT, 0);
+        // Normal 8-bit, external clock (slave, bit0=0), IRQ enabled, start — the GBA BIOS boot pattern.
+        ctx.serial.writeHalfWord(SIOCNT, MODE_NORMAL8 | IRQ_ENABLE | START);
+        ctx.serial.tick(10_000);
+
+        // No external clock ever arrives: the transfer stays busy forever and raises NO IRQ.
+        // (Completing it instantly + IRQ storms the CPU and hangs the BIOS before it boots the cart.)
+        assertNotEquals(0, ctx.serial.readHalfWord(SIOCNT) & START, "slave stays busy with nothing attached");
+        assertFalse(serialIrqRaised(ctx.interrupts), "a slave transfer with no clock raises no IRQ");
     }
 
     @Test

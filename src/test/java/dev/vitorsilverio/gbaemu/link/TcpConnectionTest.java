@@ -49,8 +49,8 @@ class TcpConnectionTest {
         client.setLinkPollMode(LinkPollMode.TRANSFER);
         AtomicReference<byte[]> hostReceived = new AtomicReference<>();
         AtomicReference<byte[]> clientReceived = new AtomicReference<>();
-        host.setListener(hostReceived::set);
-        client.setListener(clientReceived::set);
+        host.setListener((peer, data) -> hostReceived.set(data));
+        client.setListener((peer, data) -> clientReceived.set(data));
         try {
             host.hostTcp("127.0.0.1", port);
             client.joinTcp("127.0.0.1", port);

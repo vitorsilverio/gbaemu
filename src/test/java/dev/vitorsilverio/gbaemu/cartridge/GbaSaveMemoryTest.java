@@ -84,6 +84,23 @@ class GbaSaveMemoryTest {
     }
 
     @Test
+    void flashProgramsDataByteEqualToResetCommand() {
+        // 0xF0 is the flash reset command, but as a PROGRAM data byte it must be written verbatim.
+        // Swallowing it would leave 0xFF and fail the game's write-verify (e.g. Mario Kart saves).
+        GbaSaveMemory save = GbaSaveMemory.forType(GbaSaveType.FLASH);
+
+        writeFlashCommand(save, 0xA0);
+        save.write8(0x1234, 0xF0);
+
+        assertEquals(0xF0, save.read8(0x1234));
+
+        // And a subsequent unlock sequence still works (write state was properly reset).
+        writeFlashCommand(save, 0xA0);
+        save.write8(0x1235, 0x0F);
+        assertEquals(0x0F, save.read8(0x1235));
+    }
+
+    @Test
     void flashChipEraseRestoresProgrammedBytes() {
         GbaSaveMemory save = GbaSaveMemory.forType(GbaSaveType.FLASH_512);
         writeFlashCommand(save, 0xA0);

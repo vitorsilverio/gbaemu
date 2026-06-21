@@ -115,12 +115,10 @@ public final class GbaSaveMemory implements MemorySpace, CartridgeBackup {
     }
 
     private void writeFlash(int offset, int value) {
-        if (value == 0xF0) {
-            resetFlashCommandState();
-            flashIdMode = false;
-            return;
-        }
-
+        // A pending PROGRAM/BANK_SELECT consumes the NEXT write as raw data, not as a command.
+        // This must be handled before the 0xF0 reset check, otherwise programming a data byte that
+        // happens to be 0xF0 would be swallowed as a reset (leaving 0xFF) and the game's
+        // write-verify would fail — breaking saves for any data containing 0xF0.
         switch (flashWriteMode) {
             case PROGRAM -> {
                 int index = flashIndex(offset);
@@ -135,6 +133,12 @@ public final class GbaSaveMemory implements MemorySpace, CartridgeBackup {
             }
             case READY -> {
             }
+        }
+
+        if (value == 0xF0) {
+            resetFlashCommandState();
+            flashIdMode = false;
+            return;
         }
 
         if (flashUnlockStep == 0) {

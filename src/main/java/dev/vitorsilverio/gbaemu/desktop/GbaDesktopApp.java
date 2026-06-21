@@ -5,6 +5,7 @@ import dev.vitorsilverio.gbaemu.controller.CompositeController;
 import dev.vitorsilverio.gbaemu.controller.GamepadController;
 import dev.vitorsilverio.gbaemu.controller.KeyboardController;
 import dev.vitorsilverio.gbaemu.core.GbaConsole;
+import dev.vitorsilverio.gbaemu.link.GbaLink;
 
 import javax.swing.JFileChooser;
 import javax.swing.JOptionPane;
@@ -38,6 +39,9 @@ public final class GbaDesktopApp {
     private KeyboardController keyboardController;
     private GamepadController gamepadController;
     private CompositeController controller;
+    // The multiplayer link "cable": app-owned (not tied to a console), so it persists across ROM
+    // loads/restarts and can be plugged in before a game boots. Every console adopts this one.
+    private final GbaLink link = new GbaLink();
     private CpuDebugWindow cpuWindow;
     private PpuDebugWindow ppuWindow;
     private AudioDebugWindow audioWindow;
@@ -145,6 +149,9 @@ public final class GbaDesktopApp {
         }
         stopActive();
         currentRom = romFile;
+        // Hand the freshly-booted console the app-owned link "cable", so a connection established
+        // before/independent of this game is present from its first cycle (and survives restarts).
+        console.adoptLink(link);
         activeEmulator = new GbaEmulator(console, saveFile, settings);
         activeEmulator.setController(controller);
         if (gdbPort > 0) {
@@ -159,6 +166,7 @@ public final class GbaDesktopApp {
     /// boot (with a warning) when a BIOS image is required but not available.
     private GbaConsole createConsole(byte[] rom) throws IOException {
         AppSettings.BootMode mode = settings.bootMode();
+        boolean useJit = settings.cpuBackend() == AppSettings.CpuBackend.JIT;
         Path biosPath = settings.biosPath().isBlank() ? null : Path.of(settings.biosPath());
         boolean hasBios = biosPath != null && Files.isReadable(biosPath);
         if (mode == AppSettings.BootMode.NO_BIOS || !hasBios) {
@@ -168,14 +176,14 @@ public final class GbaDesktopApp {
                                 + ".\nStarting without a BIOS instead.",
                         "BIOS", JOptionPane.WARNING_MESSAGE);
             }
-            return GbaConsole.fromRom(rom);
+            return GbaConsole.fromRom(rom, useJit);
         }
         byte[] bios = Files.readAllBytes(biosPath);
         return switch (mode) {
-            case HLE -> GbaConsole.fromBiosAndRomHle(bios, rom);
-            case REAL_BIOS -> GbaConsole.fromBiosAndRom(bios, rom);
-            case REAL_SWI -> GbaConsole.fromBiosAndRomRealSwi(bios, rom);
-            case NO_BIOS -> GbaConsole.fromRom(rom);
+            case HLE -> GbaConsole.fromBiosAndRomHle(bios, rom, useJit);
+            case REAL_BIOS -> GbaConsole.fromBiosAndRom(bios, rom, useJit);
+            case REAL_SWI -> GbaConsole.fromBiosAndRomRealSwi(bios, rom, useJit);
+            case NO_BIOS -> GbaConsole.fromRom(rom, useJit);
         };
     }
 
@@ -197,6 +205,8 @@ public final class GbaDesktopApp {
                     "Load a ROM before restarting.", "Restart", JOptionPane.INFORMATION_MESSAGE);
             return;
         }
+        // The app-owned link "cable" stays connected across the reboot (the freshly-booted console
+        // re-adopts it in startEmulator), so a game can boot from the BIOS into an existing session.
         startEmulator(currentRom);
     }
 
@@ -259,10 +269,6 @@ public final class GbaDesktopApp {
     }
 
     private void linkHost() {
-        if (activeEmulator == null) {
-            needRomForLink();
-            return;
-        }
         String input = JOptionPane.showInputDialog(window.owner(),
                 "Port to host the link on:", settings.multiplayerTcpPort());
         if (input == null) {
@@ -271,18 +277,22 @@ public final class GbaDesktopApp {
         int port = parsePort(input, settings.multiplayerTcpPort());
         settings = settings.withMultiplayer(settings.multiplayerTcpHost(), port, true).normalized();
         DesktopAppSettingsStore.save(PREFERENCES, settings);
-        activeEmulator.requestHostLink(port);
+        // Operate on the app-owned cable. While a game runs the emulation thread drives the link,
+        // so route through it (avoids racing its tick); with no ROM loaded, host directly — the
+        // connection then starts pumping as soon as a ROM is loaded and adopts the cable.
+        if (activeEmulator != null) {
+            activeEmulator.requestHostLink(port);
+        } else {
+            link.hostTcp("0.0.0.0", port);
+        }
         JOptionPane.showMessageDialog(window.owner(),
                 "Hosting a link on port " + port + ".\n"
-                        + "Have the other instance Join this machine's address (127.0.0.1 if local).",
+                        + "Have the other instance Join this machine's address (127.0.0.1 if local).\n"
+                        + "You can host/join before loading a ROM — the cable stays plugged as games boot.",
                 "Link", JOptionPane.INFORMATION_MESSAGE);
     }
 
     private void linkJoin() {
-        if (activeEmulator == null) {
-            needRomForLink();
-            return;
-        }
         String input = JOptionPane.showInputDialog(window.owner(),
                 "Host to join (host:port):",
                 settings.multiplayerTcpHost() + ":" + settings.multiplayerTcpPort());
@@ -301,18 +311,25 @@ public final class GbaDesktopApp {
         }
         settings = settings.withMultiplayer(host, port, false).normalized();
         DesktopAppSettingsStore.save(PREFERENCES, settings);
-        activeEmulator.requestJoinLink(host, port);
+        if (activeEmulator != null) {
+            activeEmulator.requestJoinLink(host, port);
+        } else {
+            link.joinTcp(host, port);
+        }
+        JOptionPane.showMessageDialog(window.owner(),
+                "Joining " + host + ":" + port + ".\n"
+                        + "The cable stays connected while games boot. For link games like Mario Kart,\n"
+                        + "the extra players must boot into the session: connect first, then load/Restart\n"
+                        + "the ROM so it boots from the BIOS already on the link.",
+                "Link", JOptionPane.INFORMATION_MESSAGE);
     }
 
     private void linkDisconnect() {
         if (activeEmulator != null) {
             activeEmulator.requestDisconnectLink();
+        } else {
+            link.disconnect();
         }
-    }
-
-    private void needRomForLink() {
-        JOptionPane.showMessageDialog(window.owner(),
-                "Load a ROM before starting a link.", "Link", JOptionPane.INFORMATION_MESSAGE);
     }
 
     private static int parsePort(String text, int fallback) {

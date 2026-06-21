@@ -232,7 +232,9 @@ public final class GbaEmulator {
     }
 
     /// Stops the thread, releases the sound line and flushes the save to disk. Safe to
-    /// call more than once.
+    /// call more than once. Does NOT touch the multiplayer link: that connection is the physical
+    /// "cable", owned by the app and shared across consoles, so stopping or switching games leaves
+    /// it plugged in. The app unplugs it explicitly (Link ▸ Disconnect) or on process exit.
     public synchronized void stop() {
         if (!running.getAndSet(false)) {
             flushSaveQuietly();
@@ -249,12 +251,6 @@ public final class GbaEmulator {
             }
         }
         flushSaveQuietly();
-        // The emulation thread (the only one touching the link) has stopped; close any open
-        // multiplayer socket so switching ROMs / exiting does not leak it.
-        try {
-            console.serial().link().disconnect();
-        } catch (RuntimeException ignored) {
-        }
     }
 
     private void loop() {

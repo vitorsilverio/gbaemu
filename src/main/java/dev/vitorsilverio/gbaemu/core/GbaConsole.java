@@ -6,6 +6,16 @@ import dev.vitorsilverio.armjitter.core.CpuMode;
 import dev.vitorsilverio.armjitter.decoder.InstructionSet;
 import dev.vitorsilverio.armjitter.jit.JitRuntime;
 import dev.vitorsilverio.armjitter.jit.JitRuntimeFactory;
+import dev.vitorsilverio.armjitter.ir.opt.ConstantFoldPass;
+import dev.vitorsilverio.armjitter.ir.opt.DeadCodeEliminationPass;
+import dev.vitorsilverio.armjitter.codegen.AsmCodeEmitter;
+import dev.vitorsilverio.armjitter.codegen.AsmFallbackPolicy;
+import dev.vitorsilverio.armjitter.ir.opt.IrOptimizer;
+import dev.vitorsilverio.armjitter.jit.BlockCache;
+import dev.vitorsilverio.armjitter.jit.ExecutionThreshold;
+import dev.vitorsilverio.armjitter.decoder.ArmDecoder;
+import dev.vitorsilverio.armjitter.decoder.ThumbDecoder;
+import dev.vitorsilverio.armjitter.ir.StandardIrBuilder;
 import dev.vitorsilverio.armjitter.memory.AddressSpace;
 import dev.vitorsilverio.armjitter.memory.InvalidationAwareAddressSpace;
 import dev.vitorsilverio.armjitter.swi.SwiDispatcher;
@@ -20,6 +30,7 @@ import dev.vitorsilverio.gbaemu.cartridge.GbaSaveType;
 import dev.vitorsilverio.gbaemu.dma.GbaDmaController;
 import dev.vitorsilverio.gbaemu.input.GbaKeypad;
 import dev.vitorsilverio.gbaemu.interrupt.GbaInterruptController;
+import dev.vitorsilverio.gbaemu.link.GbaLink;
 import dev.vitorsilverio.gbaemu.memory.GbaBios;
 import dev.vitorsilverio.gbaemu.memory.GbaBus;
 import dev.vitorsilverio.gbaemu.memory.GbaEwram;
@@ -89,20 +100,32 @@ public final class GbaConsole {
     }
 
     public static GbaConsole fromRom(byte[] rom) {
+        return fromRom(rom, true);
+    }
+
+    public static GbaConsole fromRom(byte[] rom, boolean useJit) {
         GbaCartridge cartridge = GbaCartridge.load(rom);
-        GbaConsole console = create(null, cartridge.rom(), cartridge, ROM_ENTRY_POINT);
+        GbaConsole console = create(null, cartridge.rom(), cartridge, ROM_ENTRY_POINT, false, useJit);
         console.applySkipBiosState();
         return console;
     }
 
     public static GbaConsole fromBiosAndRom(byte[] bios, byte[] rom) {
+        return fromBiosAndRom(bios, rom, true);
+    }
+
+    public static GbaConsole fromBiosAndRom(byte[] bios, byte[] rom, boolean useJit) {
         GbaCartridge cartridge = GbaCartridge.load(rom);
-        return create(bios, cartridge.rom(), cartridge, BIOS_ENTRY_POINT);
+        return create(bios, cartridge.rom(), cartridge, BIOS_ENTRY_POINT, false, useJit);
     }
 
     public static GbaConsole fromBiosAndRomHle(byte[] bios, byte[] rom) {
+        return fromBiosAndRomHle(bios, rom, true);
+    }
+
+    public static GbaConsole fromBiosAndRomHle(byte[] bios, byte[] rom, boolean useJit) {
         GbaCartridge cartridge = GbaCartridge.load(rom);
-        GbaConsole console = create(bios, cartridge.rom(), cartridge, ROM_ENTRY_POINT);
+        GbaConsole console = create(bios, cartridge.rom(), cartridge, ROM_ENTRY_POINT, false, useJit);
         console.applySkipBiosState();
         return console;
     }
@@ -111,8 +134,12 @@ public final class GbaConsole {
     /// real BIOS code at 0x08 (needs a real BIOS). Diagnostic A/B test: if a glitch
     /// disappears here, our HLE SWI (e.g. a decompression routine) is the culprit.
     public static GbaConsole fromBiosAndRomRealSwi(byte[] bios, byte[] rom) {
+        return fromBiosAndRomRealSwi(bios, rom, true);
+    }
+
+    public static GbaConsole fromBiosAndRomRealSwi(byte[] bios, byte[] rom, boolean useJit) {
         GbaCartridge cartridge = GbaCartridge.load(rom);
-        GbaConsole console = create(bios, cartridge.rom(), cartridge, ROM_ENTRY_POINT, true);
+        GbaConsole console = create(bios, cartridge.rom(), cartridge, ROM_ENTRY_POINT, true, useJit);
         console.applySkipBiosState();
         return console;
     }
@@ -155,6 +182,12 @@ public final class GbaConsole {
     public GbaSystemControl systemControl() { return systemControl; }
 
     public GbaSerial serial() { return serial; }
+
+    /// Shares an app-owned link "cable" with this console's serial port, so the multiplayer
+    /// connection is not tied to one console instance and survives ROM reloads/restarts.
+    public void adoptLink(GbaLink link) {
+        serial.adoptLink(link);
+    }
 
     private static final int SAVE_STATE_MAGIC = 0x47424153; // "GBAS"
     // v2 added the serial peripheral block; older states are rejected rather than misread.
@@ -315,10 +348,14 @@ public final class GbaConsole {
     }
 
     private static GbaConsole create(byte[] biosBytes, byte[] rom, GbaCartridge cartridge, int entryPoint) {
-        return create(biosBytes, rom, cartridge, entryPoint, false);
+        return create(biosBytes, rom, cartridge, entryPoint, false, true);
     }
 
     private static GbaConsole create(byte[] biosBytes, byte[] rom, GbaCartridge cartridge, int entryPoint, boolean realBiosSwi) {
+        return create(biosBytes, rom, cartridge, entryPoint, realBiosSwi, true);
+    }
+
+    private static GbaConsole create(byte[] biosBytes, byte[] rom, GbaCartridge cartridge, int entryPoint, boolean realBiosSwi, boolean useJit) {
         // Peripherals (constructed before bus so bus can reference them)
         GbaInterruptController interrupts  = new GbaInterruptController();
         GbaLcdTiming lcdTiming             = new GbaLcdTiming(interrupts);
@@ -366,7 +403,7 @@ public final class GbaConsole {
         // The CPU accesses memory through an invalidation-aware decorator so that writes to code
         // regions (e.g. a game building a routine on the stack/IWRAM, like Mario Kart) drop any
         // stale JIT block cached for that address. The DMA/peripherals keep the raw bus.
-        JitRuntime runtime = createRuntime();
+        JitRuntime runtime = createRuntime(useJit);
         ArmCore cpu = createCpu(new InvalidationAwareAddressSpace(bus, runtime), swiDispatcher, entryPoint);
         return new GbaConsole(bus, cpu, runtime, new GbaVideo(),
                 lcdTiming, dma, interrupts, timers, keypad, cartridge, systemControl, audio, serial);
@@ -380,8 +417,10 @@ public final class GbaConsole {
         return cpu;
     }
 
-    private static JitRuntime createRuntime() {
-        return JitRuntimeFactory.interpretedArmThumb(16 * 1024, 1, ArmArchitecture.ARMV4T);
+    private static JitRuntime createRuntime(boolean useJit) {
+        return useJit
+                ? JitRuntimeFactory.armThumb(16 * 1024, 1, dev.vitorsilverio.armjitter.arch.ArmArchitecture.ARMV4T)
+                : JitRuntimeFactory.interpretedArmThumb(16 * 1024, 1, dev.vitorsilverio.armjitter.arch.ArmArchitecture.ARMV4T);
     }
 
     private void updateInterruptLine() {
