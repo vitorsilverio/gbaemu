@@ -41,3 +41,6 @@ build/
 *.gba
 *.sav
 *.ss
+
+# external helper subproject (test ROMs, not ours to push)
+gba-tests/
