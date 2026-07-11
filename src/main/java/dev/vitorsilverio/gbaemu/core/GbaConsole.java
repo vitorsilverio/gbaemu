@@ -55,6 +55,14 @@ public final class GbaConsole {
     public static final int SUPERVISOR_STACK_POINTER = 0x03007FE0;
     private static final int HARDWARE_STEP_BATCH = 8;
     private static final int HALT_TICK_BATCH     = 64;
+    /// Orçamento de ciclos internos do encadeamento de blocos (ver
+    /// {@code JitRuntime#setChainCycleBudget}, task C5). O GBA tem uma única CPU — sem o risco
+    /// de handshake cross-CPU do NDS — mas {@link #tickHardware} (DMA/timers/IRQ) só roda DEPOIS
+    /// que a corrente inteira retorna de {@code runBlock}; um orçamento grande atrasaria efeitos
+    /// de raster movidos a HBlank IRQ e o timing de DMA. Valor conservador (bem abaixo de uma
+    /// scanline = 1232 ciclos): validado sem regressão nos gba-tests e no bench headless dos 5
+    /// jogos de referência; a validação de gameplay/áudio/raster na GUI fica pendente do usuário.
+    public static final int CHAIN_CYCLE_BUDGET = 32;
 
     private final GbaBus bus;
     private final ArmCore cpu;
@@ -418,9 +426,14 @@ public final class GbaConsole {
     }
 
     private static JitRuntime createRuntime(boolean useJit) {
-        return useJit
+        JitRuntime runtime = useJit
                 ? JitRuntimeFactory.armThumb(16 * 1024, 1, dev.vitorsilverio.armjitter.arch.ArmArchitecture.ARMV4T)
                 : JitRuntimeFactory.interpretedArmThumb(16 * 1024, 1, dev.vitorsilverio.armjitter.arch.ArmArchitecture.ARMV4T);
+        // Aplicado nos dois backends (mesma granularidade de tickHardware nos dois, como o
+        // ndsemu faz) para que comparações JIT-vs-interpretado (JitInterpreterDivergenceTest)
+        // continuem válidas.
+        runtime.setChainCycleBudget(CHAIN_CYCLE_BUDGET);
+        return runtime;
     }
 
     private void updateInterruptLine() {

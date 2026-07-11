@@ -18,6 +18,20 @@ import java.nio.file.Path;
 ///   mvn -o -Dtest=JitInterpreterDivergenceTest -Dgba.rom=roms/mariokart.gba test
 class JitInterpreterDivergenceTest {
 
+    /// Este harness compara os DOIS consoles chamando {@code runBlocks(CHUNK)} o mesmo número de
+    /// vezes e assume que cada chamada avança exatamente um bloco de CPU — a premissa por trás da
+    /// busca em duas fases (grossa/fina). O encadeamento de blocos (task C5, default do
+    /// {@code GbaConsole} desde então) quebra essa premissa: cada chamada pode consumir VÁRIOS
+    /// blocos, e o JIT (tiered) e o interpretado (threshold direto) aquecem o inline cache em
+    /// ritmos diferentes, então divergem em quantos blocos cada lado encadeia por chamada — uma
+    /// divergência de CONTABILIDADE do harness, não da semântica da instrução. Desligado aqui para
+    /// manter a granularidade bloco-a-bloco que esta ferramenta de diagnóstico exige.
+    private static void disableChaining(GbaConsole... consoles) {
+        for (GbaConsole console : consoles) {
+            console.runtime().setChainCycleBudget(0);
+        }
+    }
+
     private static byte[] readOrSkip(String property, String fallback) throws Exception {
         Path path = Path.of(System.getProperty(property, fallback));
         Assumptions.assumeTrue(Files.exists(path), "missing " + path + " (set -D" + property + ")");
@@ -43,6 +57,7 @@ class JitInterpreterDivergenceTest {
         // Phase 1 (coarse): step in CHUNK-block strides; find the first chunk where state diverges.
         GbaConsole jit = GbaConsole.fromBiosAndRom(bios, rom, true);
         GbaConsole interp = GbaConsole.fromBiosAndRom(bios, rom, false);
+        disableChaining(jit, interp);
         int maxChunks = 20000;
         long blocksBeforeBadChunk = -1;
         for (int c = 0; c < maxChunks; c++) {
@@ -62,6 +77,7 @@ class JitInterpreterDivergenceTest {
         // block at a time comparing regs + memory until the first divergence.
         GbaConsole j2 = GbaConsole.fromBiosAndRom(bios, rom, true);
         GbaConsole i2 = GbaConsole.fromBiosAndRom(bios, rom, false);
+        disableChaining(j2, i2);
         if (blocksBeforeBadChunk > 0) {
             j2.runBlocks((int) blocksBeforeBadChunk);
             i2.runBlocks((int) blocksBeforeBadChunk);
