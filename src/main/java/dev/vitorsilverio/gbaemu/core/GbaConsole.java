@@ -25,6 +25,8 @@ import dev.vitorsilverio.gbaemu.cartridge.CartridgeBackup;
 import dev.vitorsilverio.gbaemu.cartridge.GbaCartridge;
 import dev.vitorsilverio.gbaemu.cartridge.GbaEepromSave;
 import dev.vitorsilverio.gbaemu.cartridge.GbaRom;
+import dev.vitorsilverio.gbaemu.cartridge.rtc.GbaRtcClock;
+import dev.vitorsilverio.gbaemu.cartridge.rtc.S3511aRtc;
 import dev.vitorsilverio.gbaemu.cartridge.GbaSaveMemory;
 import dev.vitorsilverio.gbaemu.cartridge.GbaSaveType;
 import dev.vitorsilverio.gbaemu.dma.GbaDmaController;
@@ -198,8 +200,10 @@ public final class GbaConsole {
     }
 
     private static final int SAVE_STATE_MAGIC = 0x47424153; // "GBAS"
-    // v2 added the serial peripheral block; older states are rejected rather than misread.
-    private static final int SAVE_STATE_VERSION = 2;
+    // v2 added the serial peripheral block; v3 added the cartridge RTC serial-machine
+    // block (task D1, only present when the cartridge has RTC — see saveState/loadState).
+    // Older states are rejected rather than misread.
+    private static final int SAVE_STATE_VERSION = 3;
 
     /// Writes a full machine snapshot — CPU, all writable RAM (EWRAM/IWRAM/palette/VRAM/OAM),
     /// every I/O peripheral and the cartridge save — to `path`. The BIOS and ROM are static
@@ -223,6 +227,9 @@ public final class GbaConsole {
             audio.saveState(out);
             keypad.saveState(out);
             serial.saveState(out);
+            if (cartridge.hasRtc()) {
+                bus.find(GbaRom.class).orElseThrow().rtc().saveState(out);
+            }
             byte[] cartridgeSave = backup().snapshot();
             out.writeInt(cartridgeSave.length);
             out.write(cartridgeSave);
@@ -255,6 +262,9 @@ public final class GbaConsole {
             audio.loadState(in);
             keypad.loadState(in);
             serial.loadState(in);
+            if (cartridge.hasRtc()) {
+                bus.find(GbaRom.class).orElseThrow().rtc().loadState(in);
+            }
             backup().load(in.readNBytes(in.readInt()));
             // reset() (not blockCache().clear()): also drops loop-superblock detection state,
             // which clear() alone leaves permanently stuck on any head tried before the save
@@ -377,7 +387,8 @@ public final class GbaConsole {
         GbaSystemControl systemControl     = new GbaSystemControl();
         GbaSerial serial                   = new GbaSerial(interrupts);
         GbaSaveMemory saveMemory           = GbaSaveMemory.forType(cartridge.saveType());
-        GbaRom gbRom                       = new GbaRom(rom);
+        S3511aRtc rtc                      = cartridge.hasRtc() ? new S3511aRtc(GbaRtcClock.SYSTEM) : null;
+        GbaRom gbRom                       = new GbaRom(rom, rtc);
 
         // Build bus — DMA needs the bus for transfers, so we wire after construction
         GbaBus bus = new GbaBus();
