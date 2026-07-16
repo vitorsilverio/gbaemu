@@ -21,4 +21,12 @@ public final class GbaEwram implements MemorySpace {
     public void writeByte(int address, int value) {
         data[GbaMemoryRegion.EWRAM.offset(address)] = (byte) value;
     }
+
+    /// Expõe o array de apoio para o `GbaBus` copiar para dentro de uma
+    /// `PagedAddressSpace` (task C6) — uso restrito ao pacote `memory`. Depois dessa
+    /// chamada, a página de RAM da tabela de páginas passa a ser a fonte da verdade;
+    /// este objeto não é mais consultado.
+    byte[] bytes() {
+        return data;
+    }
 }
