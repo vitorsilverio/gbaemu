@@ -52,6 +52,9 @@ public final class GbaVideo {
     private static final int WINDOW_OBJ_ENABLE = 1 << 4;
     private static final int WINDOW_BLEND_ENABLE = 1 << 5;
     private static final int WINDOW_ALL_LAYERS = 0x1F;
+    private static final int WINOUT_OBJ_WINDOW_SHIFT = 8;
+    private static final int OBJ_MODE_SEMI_TRANSPARENT = 1;
+    private static final int OBJ_MODE_WINDOW = 2;
     private static final int VRAM = 0x06000000;
     private static final int OAM = 0x07000000;
     private static final int PALETTE = 0x05000000;
@@ -86,6 +89,10 @@ public final class GbaVideo {
     private final int[] objPriority = new int[WIDTH];
     private final boolean[] objSemi = new boolean[WIDTH];
     private final byte[] windowMaskLine = new byte[WIDTH];
+    // Per-scanline coverage of OBJ-window-mode sprites (attr0 mode==2): these sprites are never
+    // drawn as pixels, they only define a window region (their opaque texels become "inside the
+    // OBJ window"), consulted by activeWindowMaskLine(). Recomputed before the window mask.
+    private final boolean[] objWindowCoverage = new boolean[WIDTH];
 
     // Internal affine reference points (BG2/BG3), reloaded from the register at frame top
     // and on a mid-frame rewrite, advanced by PB/PD per scanline otherwise.
@@ -134,6 +141,9 @@ public final class GbaVideo {
             objColor[x] = TRANSPARENT;
         }
 
+        if ((dispcnt & OBJ_ENABLE) != 0 && (dispcnt & OBJ_WINDOW_ENABLE) != 0) {
+            computeObjWindowCoverage(memory, dispcnt, line);
+        }
         byte[] mask = activeWindowMaskLine(memory, dispcnt, line);
         if ((dispcnt & OBJ_ENABLE) != 0) {
             gatherObjectsLine(memory, dispcnt, line, mask);
@@ -475,7 +485,7 @@ public final class GbaVideo {
             boolean doubleSize = affine && (attr0 & (1 << 9)) != 0;
             boolean disabled = !affine && (attr0 & (1 << 9)) != 0;
             int objectMode = (attr0 >>> 10) & 0x3;
-            if (disabled || objectMode == 2) {
+            if (disabled || objectMode == OBJ_MODE_WINDOW) {
                 continue;
             }
 
@@ -492,13 +502,13 @@ public final class GbaVideo {
             if (py < 0 || py >= renderHeight) {
                 continue;
             }
-            boolean semiTransparent = objectMode == 1;
+            boolean semiTransparent = objectMode == OBJ_MODE_SEMI_TRANSPARENT;
             if (affine) {
                 gatherAffineObjectLine(memory, oneDimensionalMapping, attr1, attr2, py,
-                        width, height, renderWidth, renderHeight, eightBpp(attr0), semiTransparent, mask);
+                        width, height, renderWidth, renderHeight, eightBpp(attr0), semiTransparent, mask, false);
             } else {
                 gatherObjectLine(memory, oneDimensionalMapping, attr0, attr1, attr2, py,
-                        width, height, semiTransparent, mask);
+                        width, height, semiTransparent, mask, false);
             }
         }
     }
@@ -513,7 +523,8 @@ public final class GbaVideo {
             int width,
             int height,
             boolean semiTransparent,
-            byte[] mask) {
+            byte[] mask,
+            boolean windowSprite) {
         int x = attr1 & 0x1FF;
         if (x >= 256) {
             x -= 512;
@@ -532,12 +543,21 @@ public final class GbaVideo {
 
         for (int px = 0; px < width; px++) {
             int screenX = x + px;
-            if (screenX < 0 || screenX >= WIDTH || !objectLayerEnabled(mask, screenX)) {
+            if (screenX < 0 || screenX >= WIDTH) {
+                continue;
+            }
+            if (!windowSprite && !objectLayerEnabled(mask, screenX)) {
                 continue;
             }
             int tileX = horizontalFlip ? width - 1 - px : px;
             int color = objectPixel(memory, oneDimensionalMapping, eightBpp, tileNumber, paletteBank, width, tileX, tileY);
-            placeObjectPixel(screenX, color, priority, semiTransparent);
+            if (windowSprite) {
+                if (color != TRANSPARENT) {
+                    objWindowCoverage[screenX] = true;
+                }
+            } else {
+                placeObjectPixel(screenX, color, priority, semiTransparent);
+            }
         }
     }
 
@@ -553,7 +573,8 @@ public final class GbaVideo {
             int renderHeight,
             boolean eightBpp,
             boolean semiTransparent,
-            byte[] mask) {
+            byte[] mask,
+            boolean windowSprite) {
         int x = attr1 & 0x1FF;
         if (x >= 256) {
             x -= 512;
@@ -579,7 +600,10 @@ public final class GbaVideo {
 
         for (int px = 0; px < renderWidth; px++) {
             int screenX = x + px;
-            if (screenX < 0 || screenX >= WIDTH || !objectLayerEnabled(mask, screenX)) {
+            if (screenX < 0 || screenX >= WIDTH) {
+                continue;
+            }
+            if (!windowSprite && !objectLayerEnabled(mask, screenX)) {
                 continue;
             }
             int dx = px - renderCenterX;
@@ -590,7 +614,13 @@ public final class GbaVideo {
             }
             int color = objectPixel(memory, oneDimensionalMapping, eightBpp, tileNumber, paletteBank,
                     textureWidth, textureX, textureY);
-            placeObjectPixel(screenX, color, priority, semiTransparent);
+            if (windowSprite) {
+                if (color != TRANSPARENT) {
+                    objWindowCoverage[screenX] = true;
+                }
+            } else {
+                placeObjectPixel(screenX, color, priority, semiTransparent);
+            }
         }
     }
 
@@ -618,21 +648,68 @@ public final class GbaVideo {
         int outsideMask = winOut & (WINDOW_ALL_LAYERS | WINDOW_OBJ_ENABLE | WINDOW_BLEND_ENABLE);
         int win0Mask = winIn & (WINDOW_ALL_LAYERS | WINDOW_OBJ_ENABLE | WINDOW_BLEND_ENABLE);
         int win1Mask = (winIn >>> 8) & (WINDOW_ALL_LAYERS | WINDOW_OBJ_ENABLE | WINDOW_BLEND_ENABLE);
+        int objWinMask = (winOut >>> WINOUT_OBJ_WINDOW_SHIFT) & (WINDOW_ALL_LAYERS | WINDOW_OBJ_ENABLE | WINDOW_BLEND_ENABLE);
         int win0H = memory.read16(WIN0H);
         int win1H = memory.read16(WIN1H);
         int win0V = memory.read16(WIN0V);
         int win1V = memory.read16(WIN1V);
 
+        // Window priority (GBATEK): WIN0 > WIN1 > OBJ window > outside.
         for (int x = 0; x < WIDTH; x++) {
             int maskValue = outsideMask;
             if ((dispcnt & WIN0_ENABLE) != 0 && inWindow(x, line, win0H, win0V)) {
                 maskValue = win0Mask;
             } else if ((dispcnt & WIN1_ENABLE) != 0 && inWindow(x, line, win1H, win1V)) {
                 maskValue = win1Mask;
+            } else if ((dispcnt & OBJ_WINDOW_ENABLE) != 0 && objWindowCoverage[x]) {
+                maskValue = objWinMask;
             }
             windowMaskLine[x] = (byte) maskValue;
         }
         return windowMaskLine;
+    }
+
+    /// Preenche {@link #objWindowCoverage} com os pixels opacos de sprites em modo OBJ window
+    /// (attr0 mode==2) desta scanline. Esses sprites nunca sao desenhados como pixel — servem so
+    /// para definir a regiao do OBJ window consultada por {@link #activeWindowMaskLine}.
+    private void computeObjWindowCoverage(AddressSpace memory, int dispcnt, int line) {
+        Arrays.fill(objWindowCoverage, false);
+        boolean oneDimensionalMapping = (dispcnt & OBJ_1D_MAPPING) != 0;
+        for (int object = 0; object < 128; object++) {
+            int base = OAM + object * 8;
+            int attr0 = memory.read16(base);
+            if (((attr0 >>> 10) & 0x3) != OBJ_MODE_WINDOW) {
+                continue;
+            }
+            boolean affine = (attr0 & (1 << 8)) != 0;
+            boolean doubleSize = affine && (attr0 & (1 << 9)) != 0;
+            boolean disabled = !affine && (attr0 & (1 << 9)) != 0;
+            if (disabled) {
+                continue;
+            }
+            int attr1 = memory.read16(base + 2);
+            int attr2 = memory.read16(base + 4);
+            int[] dimensions = objectDimensions((attr0 >>> 14) & 0x3, (attr1 >>> 14) & 0x3);
+            int width = dimensions[0];
+            int height = dimensions[1];
+            int renderWidth = doubleSize ? width * 2 : width;
+            int renderHeight = doubleSize ? height * 2 : height;
+            int y = attr0 & 0xFF;
+            if (y >= 160) {
+                y -= 256;
+            }
+            int py = line - y;
+            if (py < 0 || py >= renderHeight) {
+                continue;
+            }
+            if (affine) {
+                gatherAffineObjectLine(memory, oneDimensionalMapping, attr1, attr2, py,
+                        width, height, renderWidth, renderHeight, eightBpp(attr0), false, null, true);
+            } else {
+                gatherObjectLine(memory, oneDimensionalMapping, attr0, attr1, attr2, py,
+                        width, height, false, null, true);
+            }
+        }
     }
 
     private static boolean inWindow(int x, int y, int horizontal, int vertical) {

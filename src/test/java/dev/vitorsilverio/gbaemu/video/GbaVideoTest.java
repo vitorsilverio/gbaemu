@@ -549,6 +549,33 @@ class GbaVideoTest {
         assertEquals(0xFF7B7B7B, frame[0]);
     }
 
+    @Test
+    void objWindowModeSpriteMasksBlendWithoutBeingDrawnItself() {
+        // D2 hipótese 3: FireRed's battle stat up/down overlay is an OBJ-mode-2 ("OBJ window")
+        // sprite whose opaque texels define a region where BLDCNT blending is allowed, elsewhere
+        // suppressed. The sprite itself must never appear as a visible pixel.
+        GbaBus bus = createBus();
+        GbaVideo video = new GbaVideo();
+
+        disableObjects(bus);
+        bus.write16(0x04000000, (1 << 15) | (1 << 12)); // OBJ window enable + OBJ enable, mode 0
+        bus.write16(0x05000000, 0x001F); // backdrop = red
+        bus.write16(0x04000050, 0xA0);   // BLDCNT: mode=brighten(2), 1st target=backdrop(bit5)
+        bus.write16(0x04000054, 16);     // BLDY: EVY=16/16 -> full brighten to white
+        bus.write16(0x0400004A, 1 << 13); // WINOUT: outside blend off, inside OBJ window blend on
+
+        // OBJ0: mode=2 (OBJ window), 8x8 square at x=8, one opaque texel.
+        bus.write16(0x07000000, 2 << 10);
+        bus.write16(0x07000002, 8);
+        bus.write16(0x07000004, 0);
+        bus.write16(0x06010000, 0x0001); // OBJ VRAM ignores 8-bit writes on hardware
+
+        int[] frame = video.renderFrame(bus);
+
+        assertEquals(0xFFFF0000, frame[0]); // outside the OBJ window: blend suppressed, red backdrop
+        assertEquals(0xFFFFFFFF, frame[8]); // inside: blend allowed, brightened to white
+    }
+
     private static void disableObjects(GbaBus bus) {
         for (int object = 0; object < 128; object++) {
             bus.write16(0x07000000 + object * 8, 1 << 9);
