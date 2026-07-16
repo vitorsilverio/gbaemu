@@ -256,7 +256,11 @@ public final class GbaConsole {
             keypad.loadState(in);
             serial.loadState(in);
             backup().load(in.readNBytes(in.readInt()));
-            runtime.blockCache().clear();
+            // reset() (not blockCache().clear()): also drops loop-superblock detection state,
+            // which clear() alone leaves permanently stuck on any head tried before the save
+            // (task C11). gbaemu doesn't enable loop-superblocks under INTERPRETED (the default),
+            // so this is a no-op here today — kept for parity if that ever changes.
+            runtime.reset();
             updateInterruptLine();
         }
     }
