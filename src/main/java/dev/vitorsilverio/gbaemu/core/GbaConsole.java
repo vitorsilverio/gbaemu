@@ -489,7 +489,7 @@ public final class GbaConsole {
 
     private void triggerTimedDma(Events events) {
         for (int i = 0; i < events.vblankStartedCount(); i++) dma.triggerVblankTransfers();
-        for (int i = 0; i < events.hblankStartedCount(); i++) dma.triggerHblankTransfers();
+        for (int i = 0; i < events.hblankStartedVisibleCount(); i++) dma.triggerHblankTransfers();
     }
 
     private static byte[] skipBiosStub() {

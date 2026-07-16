@@ -110,4 +110,17 @@ class GbaLcdTimingTest {
 
         assertEquals(3, events.hblankStartedCount());
     }
+
+    @Test
+    void hblankFiresOnAllScanlinesButVisibleCountExcludesVblank() {
+        // D2 hipótese 1: H-Blank DMA (unlike the H-Blank flag/IRQ) must not be driven during
+        // V-Blank (scanlines 160-227) — GBATEK "DMA H-Blank mode". A full frame has 228
+        // scanlines but only 160 visible ones.
+        GbaLcdTiming timing = new GbaLcdTiming(null);
+
+        GbaLcdTiming.Events events = timing.tick(GbaLcdTiming.CYCLES_PER_SCANLINE * GbaLcdTiming.TOTAL_SCANLINES);
+
+        assertEquals(GbaLcdTiming.TOTAL_SCANLINES, events.hblankStartedCount());
+        assertEquals(GbaLcdTiming.VISIBLE_SCANLINES, events.hblankStartedVisibleCount());
+    }
 }

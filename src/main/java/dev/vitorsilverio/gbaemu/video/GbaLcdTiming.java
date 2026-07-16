@@ -50,8 +50,9 @@ public final class GbaLcdTiming implements MemorySpace {
     private boolean hblank;
     private boolean vcountMatch;
 
-    public record Events(int vblankStartedCount, int hblankStartedCount, int vcountMatchedCount) {
-        static final Events NONE = new Events(0, 0, 0);
+    public record Events(int vblankStartedCount, int hblankStartedCount,
+                          int hblankStartedVisibleCount, int vcountMatchedCount) {
+        static final Events NONE = new Events(0, 0, 0, 0);
 
         public boolean vblankStarted() { return vblankStartedCount > 0; }
         public boolean hblankStarted() { return hblankStartedCount > 0; }
@@ -61,6 +62,7 @@ public final class GbaLcdTiming implements MemorySpace {
             return new Events(
                     vblankStartedCount + other.vblankStartedCount,
                     hblankStartedCount + other.hblankStartedCount,
+                    hblankStartedVisibleCount + other.hblankStartedVisibleCount,
                     vcountMatchedCount + other.vcountMatchedCount);
         }
     }
@@ -189,12 +191,19 @@ public final class GbaLcdTiming implements MemorySpace {
         boolean vblankStarted  = !vblank      && nextVblank;
         boolean hblankStarted  = !hblank      && nextHblank;
         boolean vcountMatched  = !vcountMatch && nextVcountMatch;
+        // Hardware only drives H-Blank DMA on the visible scanlines (0-159): during V-Blank
+        // (160-227) the H-Blank flag/IRQ still fires every line, but H-Blank-timed DMA does not
+        // (GBATEK "DMA H-Blank mode"). FireRed's per-scanline battle fade uses H-Blank DMA to
+        // step a table with exactly 160 entries; triggering it on all 228 lines runs the table
+        // 68 entries past its end each frame, reading garbage for the bottom third of the screen.
+        boolean hblankStartedVisible = hblankStarted && scanline < VISIBLE_SCANLINES;
         if (interrupts != null) {
             if (vblankStarted  && (dispstat & (1 << 3)) != 0) interrupts.request(GbaInterrupt.VBLANK);
             if (hblankStarted  && (dispstat & (1 << 4)) != 0) interrupts.request(GbaInterrupt.HBLANK);
             if (vcountMatched  && (dispstat & (1 << 5)) != 0) interrupts.request(GbaInterrupt.VCOUNT);
         }
-        return new Events(vblankStarted ? 1 : 0, hblankStarted ? 1 : 0, vcountMatched ? 1 : 0);
+        return new Events(vblankStarted ? 1 : 0, hblankStarted ? 1 : 0,
+                hblankStartedVisible ? 1 : 0, vcountMatched ? 1 : 0);
     }
 
     // Raw register access (hardware writes, no restrictions)
