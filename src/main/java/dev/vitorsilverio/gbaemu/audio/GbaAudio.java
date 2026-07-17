@@ -74,6 +74,16 @@ public final class GbaAudio implements MemorySpace {
     private final int[] channelVolume = {100, 100, 100, 100, 100, 100};
     private int lastSampleA;
     private int lastSampleB;
+    // Diagnostic-only counters (task D4): how many times a Direct Sound channel was asked
+    // for a new sample while its FIFO was empty (repeats lastSampleX instead) vs how many
+    // overflows were requested in total, and the largest batch of overflows serviced in one
+    // timerOverflow() call. Not part of GBA state, not saved/restored.
+    private long fifoAUnderruns;
+    private long fifoBUnderruns;
+    private long fifoASamplesRequested;
+    private long fifoBSamplesRequested;
+    private int maxOverflowsPerCallA;
+    private int maxOverflowsPerCallB;
     private double psgHpfPrevInput;
     private double psgHpfPrevOutput;
     private long sampleAccumulator;
@@ -184,6 +194,45 @@ public final class GbaAudio implements MemorySpace {
         return fifoB.size();
     }
 
+    /// Diagnostic (task D4): the timer index (0 or 1) currently selected as the sample
+    /// clock for Direct Sound A/B, read straight from SOUNDCNT_H.
+    public int directSoundTimer(boolean channelA) {
+        int control = readRaw16(SOUNDCNT_H);
+        int bit = channelA ? DIRECT_SOUND_A_TIMER : DIRECT_SOUND_B_TIMER;
+        return (control & bit) == 0 ? 0 : 1;
+    }
+
+    /// Diagnostic (task D4): how many times {@code timerOverflow} pulled a sample from an
+    /// empty FIFO (repeating the last byte) for Direct Sound A/B since the last {@link
+    /// #resetFifoDiagnostics()}.
+    public long fifoUnderruns(boolean channelA) {
+        return channelA ? fifoAUnderruns : fifoBUnderruns;
+    }
+
+    /// Diagnostic (task D4): total samples requested (popped or repeated-on-underrun) from
+    /// Direct Sound A/B since the last {@link #resetFifoDiagnostics()} — the channel's
+    /// effective playback rate over a known wall-clock window.
+    public long fifoSamplesRequested(boolean channelA) {
+        return channelA ? fifoASamplesRequested : fifoBSamplesRequested;
+    }
+
+    /// Diagnostic (task D4): the largest number of samples pulled from Direct Sound A/B in
+    /// a single {@code timerOverflow} call since the last {@link #resetFifoDiagnostics()} —
+    /// more than 1 means several timer overflows were batched before the mixer could react,
+    /// which discards all but the last sample of the batch.
+    public int maxOverflowsPerCall(boolean channelA) {
+        return channelA ? maxOverflowsPerCallA : maxOverflowsPerCallB;
+    }
+
+    public void resetFifoDiagnostics() {
+        fifoAUnderruns = 0;
+        fifoBUnderruns = 0;
+        fifoASamplesRequested = 0;
+        fifoBSamplesRequested = 0;
+        maxOverflowsPerCallA = 0;
+        maxOverflowsPerCallB = 0;
+    }
+
     /// Mutes or unmutes one channel (1-6: CH1-CH4 PSG, 5/6 Direct Sound A/B). A user
     /// control for the debug panel; independent of the game's own enable bits.
     public void setChannelMuted(int channel, boolean muted) {
@@ -279,7 +328,12 @@ public final class GbaAudio implements MemorySpace {
         int timerB = (control & DIRECT_SOUND_B_TIMER) == 0 ? 0 : 1;
         if (enabledA && (timerOverflowMask & (1 << timerA)) != 0) {
             int overflows = timerA == 0 ? timer0Overflows : timer1Overflows;
+            maxOverflowsPerCallA = Math.max(maxOverflowsPerCallA, overflows);
             for (int i = 0; i < overflows; i++) {
+                if (fifoA.isEmpty()) {
+                    fifoAUnderruns++;
+                }
+                fifoASamplesRequested++;
                 nextDirectSoundSample(fifoA, true);
             }
             if (fifoA.size() <= FIFO_REFILL_LEVEL) {
@@ -288,7 +342,12 @@ public final class GbaAudio implements MemorySpace {
         }
         if (enabledB && (timerOverflowMask & (1 << timerB)) != 0) {
             int overflows = timerB == 0 ? timer0Overflows : timer1Overflows;
+            maxOverflowsPerCallB = Math.max(maxOverflowsPerCallB, overflows);
             for (int i = 0; i < overflows; i++) {
+                if (fifoB.isEmpty()) {
+                    fifoBUnderruns++;
+                }
+                fifoBSamplesRequested++;
                 nextDirectSoundSample(fifoB, false);
             }
             if (fifoB.size() <= FIFO_REFILL_LEVEL) {

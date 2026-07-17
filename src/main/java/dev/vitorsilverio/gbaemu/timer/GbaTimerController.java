@@ -91,6 +91,17 @@ public final class GbaTimerController implements MemorySpace {
         return overflowCounts[timer];
     }
 
+    /// Diagnostic (task D4): the CPU-cycle period between overflows of a running timer
+    /// (reload-to-0x10000 distance times its prescaler), or 0 if the timer is stopped.
+    public int overflowPeriodCycles(int timer) {
+        checkTimer(timer);
+        if (!enabled[timer]) {
+            return 0;
+        }
+        int prescaler = PRESCALERS[control(timer) & PRESCALER_MASK];
+        return (0x10000 - reloads[timer]) * prescaler;
+    }
+
     /// Serializes all timer state (registers + counters/reloads/accumulators) into a save state.
     public void saveState(java.io.DataOutputStream out) throws java.io.IOException {
         out.write(registers);
