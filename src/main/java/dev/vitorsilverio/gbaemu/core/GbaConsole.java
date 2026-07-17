@@ -201,9 +201,10 @@ public final class GbaConsole {
 
     private static final int SAVE_STATE_MAGIC = 0x47424153; // "GBAS"
     // v2 added the serial peripheral block; v3 added the cartridge RTC serial-machine
-    // block (task D1, only present when the cartridge has RTC — see saveState/loadState).
+    // block (task D1, only present when the cartridge has RTC — see saveState/loadState);
+    // v4 reflects ArmCore's own internal save-state format bump (task B3.3, VFP bank/FPSCR).
     // Older states are rejected rather than misread.
-    private static final int SAVE_STATE_VERSION = 3;
+    private static final int SAVE_STATE_VERSION = 4;
 
     /// Writes a full machine snapshot — CPU, all writable RAM (EWRAM/IWRAM/palette/VRAM/OAM),
     /// every I/O peripheral and the cartridge save — to `path`. The BIOS and ROM are static
