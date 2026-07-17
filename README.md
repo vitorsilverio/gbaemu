@@ -13,105 +13,120 @@ Para o GBA, o GBATEK cumpre o mesmo papel que o Pan Docs teve no projeto de Game
 
 ## Estado atual
 
-- Projeto Maven Java 25.
-- Dependencia local em `dev.vitorsilverio:arm-jitter:1.0`.
-- Barramento `GbaMemory` implementando `AddressSpace` do `arm-jitter`.
-- Boot por ROM direto ou por BIOS+ROM. Na CLI, `--bios` carrega a BIOS mas usa boot HLE por padrao; `--real-bios` força o PC inicial em `00000000` para depurar a BIOS real.
-- Skip BIOS explicito em `GbaConsole.fromRom(...)`, com PC em `08000000`, stack inicial e `POSTFLG`.
-- Renderer inicial `GbaVideo` com framebuffer ARGB de 240x160.
-- DMA inicial para DMA0-3, cobrindo disparos imediato/VBlank/HBlank, halfword/word, incremento/decremento/fixo/reload e mascaras de endereco.
-- Interrupcoes iniciais com IE/IF/IME, write-one-to-clear em IF, linha externa da CPU e pedidos de LCD/DMA.
-- Timers TM0-3 com reload, prescaler, cascata e IRQ-on-overflow.
-- Keypad com `KEYINPUT` active-low, `KEYCNT` OR/AND e IRQ de keypad.
-- Audio inicial com registradores `SOUND1-4`, `SOUNDCNT_L/H/X`, `SOUNDBIAS` e FIFOs A/B mapeados em I/O.
-- Waitstates iniciais ligados a API `AddressSpace.accessCycles` do `arm-jitter`, alimentando `core.cycles()` para sincronizar CPU/LCD/timers.
-- Cartucho com parsing do header GBA, titulo, game code, maker code, fixed value e complement check.
-- Deteccao de save type por assinatura na ROM: SRAM, FLASH, FLASH512, FLASH1M e EEPROM.
-- Save memory inicial com backing SRAM-like, snapshot/load e ligacao na regiao `0E000000`.
-- Controle simples de sistema com `POSTFLG`, `HALTCNT` e `WAITCNT`.
-- BIOS HLE via callbacks de SWI para skip BIOS/ROM: cobre `SoftReset` ate `SoundGetJumpList` (`0x00..0x2A`), com implementacoes para reset, math, copia, affine, unpack/decompress, filtros Diff e stubs seguros para audio/multiboot enquanto a APU completa evolui.
-- Diagnostico de video com estatisticas de `DISPCNT`, modo, cores, pixels nao-backdrop, Palette/VRAM nao-zero e OBJ visiveis.
-- Trace publico da CPU do `arm-jitter` integrado ao CLI para capturar janelas iniciais/finais de PC, ARM/THUMB, instrucao, SP/LR/CPSR e ciclos durante o boot.
-- PPU implementada ate agora:
-  - Modos bitmap 3, 4 e 5 com page select nos modos 4/5.
-  - Backgrounds regulares/text BG em modo 0 e BG0/BG1 em modo 1.
-  - Scroll `BGxHOFS/BGxVOFS`, tilemaps 4bpp/8bpp, screen sizes 256/512, flip H/V e prioridade basica.
-  - Backgrounds affine BG2/BG3 em modos 1/2 com matriz, referencia, wrap e prioridade.
-  - OBJ/sprites regulares 4bpp/8bpp, shape/size, flip H/V, prioridade contra BG e mapeamento 1D/2D.
-  - OBJ affine inicial com matrizes de OAM e double-size.
-  - Timing inicial de LCD com `VCOUNT`, flags de `DISPSTAT`, VBlank/HBlank e eventos para DMA.
-  - Ainda faltam mosaic, windows, alpha blending/brightness e timing com IRQ por scanline.
-- Mapa inicial de memoria conforme GBATEK:
-  - BIOS `00000000-00003FFF`
-  - EWRAM `02000000-0203FFFF`, espelhada na janela `02000000-02FFFFFF`
-  - IWRAM `03000000-03007FFF`, espelhada na janela `03000000-03FFFFFF`
-  - I/O `04000000-040003FE`
-  - Palette RAM `05000000-050003FF`, espelhada
-  - VRAM `06000000-06017FFF`, espelhada em blocos de 128 KiB
-  - OAM `07000000-070003FF`, espelhada
-  - Game Pak ROM `08000000-0DFFFFFF` nas tres janelas de wait-state
-  - SRAM `0E000000-0FFFFFFF`, espelhada a cada 64 KiB
-- Fachada `GbaConsole` conectando `GbaMemory`, `ArmCore` e runtime ARM/THUMB interpretado do `arm-jitter`.
+O emulador roda jogos comerciais de ponta a ponta. Jogos validados em gameplay real
+(todos ≥2x realtime em modo headless): **Pokemon FireRed** (overworld, batalhas, menus,
+save), **Super Mario World: Super Mario Advance 2**, **Castlevania: Aria of Sorrow**,
+**Metroid Fusion** e **Mario Kart: Super Circuit**.
 
-## Uso
+### CPU
 
-Compilar e testar:
+- `ArmCore` ARMv4T do `arm-jitter`, backend **interpretado por padrao** (fidelidade de
+  IRQ por instrucao; no GBA a velocidade empata com o JIT) com backend JIT ASM disponivel.
+- Codigo automodificado suportado: o bus e envolvido em `InvalidationAwareAddressSpace`
+  e a invalidacao de blocos JIT e O(1) (page-indexed).
+- Stub GDB do `arm-jitter` para depurar o codigo guest.
+
+### Video (PPU)
+
+- Modos 0-5 completos: BG text e affine, tilemaps 4bpp/8bpp, scroll, flip, screen sizes,
+  prioridade; OBJ regular e affine (1D/2D, double-size).
+- Windows WIN0/WIN1/OBJWIN, alpha blending e brightness.
+- Timing por scanline com VCOUNT, IRQs de V-Blank/H-Blank/VCOUNT-match; HDMA disparado
+  apenas nas 160 linhas visiveis (hardware-correct).
+- Falta apenas mosaic.
+
+### Audio
+
+- 4 canais PSG (clock GBA correto) + 2 FIFOs DirectSound A/B alimentados por timers/DMA.
+- Mixagem digital com filtro high-pass (remove DC offset); mute/volume por canal na GUI.
+
+### DMA, timers e sistema
+
+- DMA0-3 com disparo imediato/VBlank/HBlank/special (FIFO de audio), executado em tempo
+  de instrucao (immediate DMAs hardware-correct) e endpoints alinhados ao tamanho da
+  transferencia.
+- Timers TM0-3 com reload, prescaler, cascata e IRQ; keypad com IRQ; IE/IF/IME;
+  waitstates via `WAITCNT`; `POSTFLG`/`HALTCNT` com halt e `IntrWait`/`VBlankIntrWait`
+  acordando somente nos IRQs corretos.
+
+### Cartucho e saves
+
+- Parsing de header, deteccao de save type por assinatura (SRAM, FLASH, FLASH512,
+  FLASH1M, EEPROM) com overrides para jogos que mentem a assinatura.
+- Persistencia em `.sav` ao lado da ROM (`GbaSaveFile`/`CartridgeBackup`).
+- RTC S-3511A via GPIO de cartucho com deteccao automatica (Pokemon Emerald, Boktai).
+
+### BIOS
+
+- BIOS HLE completa via SWI `0x00..0x2A` (reset, math, copia, affine, unpack/decompress,
+  audio) — nao precisa de dump para jogar.
+- BIOS real suportada (boot completo funciona; a animacao do boot ainda fica lenta e
+  entrecortada — pendencia conhecida D6).
+
+### GUI (Swing)
+
+Aberta por `Main` sem argumentos. Tudo configuravel por menus, sem parametros de CLI:
+
+- ROMs recentes, Settings (BIOS real ou HLE, video, audio).
+- Controles configuraveis de teclado + **gamepad** (input4j, aba Controls).
+- Save states de maquina completa (`.ss` v2): F5/F8, menu State e para arquivo.
+- Frame pacing com cap de velocidade; mute/volume por canal.
+- **Multiplayer por link cable**: serial SIO sobre TCP, 2 e 4 jogadores (host-relay).
+- Janelas de debug de CPU, PPU e audio.
+
+## Build
+
+Compilar e testar com **JBR 25** (a JDK do IntelliJ), nao o JDK do sistema, com a
+`arm-jitter` instalada no Maven local:
 
 ```bash
+mvn -f ../arm-jitter/pom.xml install
 mvn test
 ```
 
-Executar o entrypoint temporario:
+## Uso
+
+Abrir a GUI (forma recomendada de jogar):
 
 ```bash
-mvn exec:java -Dexec.mainClass=dev.vitorsilverio.gbaemu.Main -Dexec.args="--bios gba_bios.bin --rom game.gba --steps 1000 --frame boot.ppm"
+mvn exec:java -Dexec.mainClass=dev.vitorsilverio.gbaemu.Main
 ```
 
-O frame gerado usa o formato PPM binario (`P6`), simples de abrir ou converter em ferramentas de imagem.
-
-Gerar uma sequencia de frames sem trace, avancando a CPU entre capturas:
+Sem argumentos (ou com `--window`) o `Main` abre a GUI; com `--rom` e sem `--window`
+roda headless. Modo headless para testes/depuracao:
 
 ```bash
-mvn exec:java -Dexec.mainClass=dev.vitorsilverio.gbaemu.Main -Dexec.args="--bios gba_bios.bin --rom game.gba --steps 1800000 --frame bios.ppm --frame-count 8 --frame-step-cycles 280896 --debug-video"
+mvn exec:java -Dexec.mainClass=dev.vitorsilverio.gbaemu.Main -Dexec.args="--rom game.gba --steps 1800000 --frame frame.ppm --debug-video"
 ```
 
-Abrir uma janela Swing com escala inteira:
-
-```bash
-mvn exec:java -Dexec.mainClass=dev.vitorsilverio.gbaemu.Main -Dexec.args="--bios gba_bios.bin --rom game.gba --window --scale 3 --no-frame"
-```
-
-Por padrao a janela avanca um frame de LCD por tick (`280896` ciclos). Para desacelerar/acelerar
-o bring-up visual, ajuste `--cycles-per-frame N`. `--steps-per-frame N` ainda existe como modo
-manual de debug e, quando informado, tem prioridade sobre o avanco por ciclos.
-
-Para investigar tela preta durante o bring-up da CPU/BIOS real, adicione `--real-bios --debug-video`.
-Isso imprime periodicamente um resumo como `mode`, `DISPCNT`, camadas habilitadas, quantidade de cores renderizadas,
-pixels diferentes do backdrop, Palette/VRAM nao-zero e OBJ visiveis:
-
-```bash
-mvn exec:java -Dexec.mainClass=dev.vitorsilverio.gbaemu.Main -Dexec.args="--bios gba_bios.bin --rom game.gba --window --scale 3 --no-frame --debug-video"
-```
-
-Para investigar loops de CPU no boot da BIOS, use `--trace-cpu N` para imprimir o inicio e
-`--trace-cpu-tail N` para guardar e imprimir apenas as ultimas instrucoes ao fim do run.
-O trace inclui PC, ARM/THUMB, opcode, tipo da instrucao, proximo PC, `r0-r12`, SP, LR, CPSR e ciclos:
-
-```bash
-mvn exec:java -Dexec.mainClass=dev.vitorsilverio.gbaemu.Main -Dexec.args="--bios gba_bios.bin --rom game.gba --steps 600 --no-frame --trace-cpu 40 --trace-cpu-tail 80"
-```
+Flags principais: `--bios`/`--real-bios` (BIOS real), `--steps`/`--cycles`, `--frame`
+(PPM), `--frame-count`/`--frame-step-cycles` (sequencia de frames), `--debug-video`,
+`--debug-state`, `--trace-cpu N`/`--trace-cpu-tail N` (trace de PC/registradores/ciclos).
+`--help` imprime a lista completa.
 
 Criar uma instancia programatica:
 
 ```java
-byte[] bios = Files.readAllBytes(Path.of("gba_bios.bin"));
 byte[] rom = Files.readAllBytes(Path.of("game.gba"));
-GbaConsole console = GbaConsole.fromBiosAndRom(bios, rom);
+GbaConsole console = GbaConsole.fromRom(rom); // skip BIOS, estado pos-BIOS
 console.stepCpu(1);
 int[] argb = console.renderFrame();
 ```
 
-Tambem existe `GbaConsole.fromRom(rom)` para skip BIOS, iniciando em `08000000` com estado inicial pos-BIOS.
+Tambem existem `GbaConsole.fromBiosAndRom(...)` (BIOS real) e
+`GbaConsole.fromBiosAndRomHle(...)` (BIOS carregada + SWI HLE).
+
+## Mapa de memoria (GBATEK)
+
+- BIOS `00000000-00003FFF`
+- EWRAM `02000000-0203FFFF`, espelhada na janela `02000000-02FFFFFF`
+- IWRAM `03000000-03007FFF`, espelhada na janela `03000000-03FFFFFF`
+- I/O `04000000-040003FE`
+- Palette RAM `05000000-050003FF`, espelhada
+- VRAM `06000000-06017FFF`, espelhada em blocos de 128 KiB
+- OAM `07000000-070003FF`, espelhada
+- Game Pak ROM `08000000-0DFFFFFF` nas tres janelas de wait-state
+- SRAM `0E000000-0FFFFFFF`, espelhada a cada 64 KiB
 
 ## Regras de desenvolvimento
 
@@ -120,12 +135,10 @@ Tambem existe `GbaConsole.fromRom(rom)` para skip BIOS, iniciando em `08000000` 
 - Nao executar comandos fora do sandbox; se algum passo exigir acesso externo ou permissao especial, o comando deve ser pedido ao usuario.
 - Preferir a API publica do `arm-jitter` para CPU/JIT e isolar detalhes especificos do GBA no `gbaemu`.
 - Usar o GBATEK como fonte para memoria, I/O, DMA, timers, PPU, audio, keypad, interrupcoes, BIOS e cartuchos.
-- A BIOS real deve ser tratada como programa de teste de integracao: quando ela parar por instrucao ARM ainda nao implementada, a correcao deve acontecer no `arm-jitter`; quando parar por acesso de hardware ausente, a correcao deve acontecer no `gbaemu`.
+- GBATEK descreve GBA e NDS juntos: o GBA e ARM7TDMI/**ARMv4T** — nunca aplicar recursos ARMv5+ aqui.
 
-## Proximos passos sugeridos
+## Pendencias conhecidas
 
-1. Rodar a BIOS real ate a primeira instrucao/acesso nao suportado e registrar o ponto de parada.
-2. Corrigir o proximo ponto de BIOS real apos o display ligar: fluxo de IRQ/retorno para continuar a animacao do boot.
-3. Agendar DMA Special para audio/cartucho e conectar os FIFOs de audio aos timers.
-4. Expandir a PPU para windows, mosaic e blending.
-5. Depois que a BIOS completar, criar skip BIOS com estado inicial equivalente.
+- Mosaic na PPU (nenhum jogo validado usa de forma visivel).
+- Animacao da BIOS real lenta/entrecortada (task D6 no `arm-jitter/tasks/`).
+- ROMs de teste `bios.gba`/visual/unsafe do pacote gba-tests adiadas (demais passam).
