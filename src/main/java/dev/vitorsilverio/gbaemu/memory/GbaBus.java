@@ -227,7 +227,7 @@ public final class GbaBus implements AddressSpace {
             int size = region.end() - region.start() + 1;
             mapHandlerBucket(built, region.start(), size, probeBucketMembers(region.start(), region.end()));
         }
-        mapHandlerBucket(built, GbaMemoryRegion.IO.start(), IO_BLOCK_SIZE, probeIoMembers());
+        mapIoBucket(built);
         mapHandlerBucket(built, GAME_PAK_LOW_START, GAME_PAK_LOW_SIZE,
                 probeBucketMembers(GAME_PAK_LOW_START, GAME_PAK_EEPROM_WINDOW_START - 1));
         mapHandlerBucket(built, GAME_PAK_EEPROM_WINDOW_START, GAME_PAK_EEPROM_WINDOW_SIZE,
@@ -258,6 +258,31 @@ public final class GbaBus implements AddressSpace {
         int pageSize = built.pageSize();
         int roundedSize = ((size + pageSize - 1) / pageSize) * pageSize;
         built.mapHandler(base, roundedSize, new MemorySpaceGroup(members));
+    }
+
+    /// Mapeia o bloco de I/O com uma tabela de posse pré-computada (endereço -> dono),
+    /// em vez de depender do `owner()` de [MemorySpaceGroup] varrer `members` a cada
+    /// acesso: este bucket sozinho concentra dezenas de dispositivos (timers, DMA, som,
+    /// vídeo, teclado, serial) e é o mais acessado do barramento — o perfil da task C8
+    /// (fase 2, candidato #4) mostrou `MemorySpaceGroup.owner` como um dos frames mais
+    /// quentes do interpretador. A tabela reproduz EXATAMENTE a mesma regra de
+    /// prioridade do `owner()` original (primeiro dispositivo de `members`, na ordem
+    /// devolvida por [#probeIoMembers], cujo `contains` bate) — só resolvida uma única
+    /// vez na montagem em vez de a cada leitura/escrita.
+    private void mapIoBucket(PagedAddressSpace built) {
+        int start = GbaMemoryRegion.IO.start();
+        List<MemorySpace> members = probeIoMembers();
+        MemorySpace[] ownerTable = new MemorySpace[IO_BLOCK_SIZE];
+        for (int i = 0; i < IO_BLOCK_SIZE; i++) {
+            int address = start + i;
+            for (MemorySpace space : members) {
+                if (space.contains(address)) {
+                    ownerTable[i] = space;
+                    break;
+                }
+            }
+        }
+        built.mapHandler(start, IO_BLOCK_SIZE, new MemorySpaceGroup(members, ownerTable, start));
     }
 
     /// Devolve os dispositivos (exceto EWRAM/IWRAM, já tratados como RAM) cujo `contains`
@@ -314,12 +339,29 @@ public final class GbaBus implements AddressSpace {
     /// interna: acessa `openBusValue` diretamente).
     private final class MemorySpaceGroup implements AddressSpace {
         private final List<MemorySpace> members;
+        /// Tabela opcional endereço→dono pré-computada (ver [#mapIoBucket]); `null` nos
+        /// buckets pequenos (no máximo 2 membros via [#probeBucketMembers]), onde a
+        /// varredura de `members` já é O(1) na prática e não justifica a tabela.
+        private final MemorySpace[] fastOwners;
+        private final int fastBase;
 
         MemorySpaceGroup(List<MemorySpace> members) {
+            this(members, null, 0);
+        }
+
+        MemorySpaceGroup(List<MemorySpace> members, MemorySpace[] fastOwners, int fastBase) {
             this.members = members;
+            this.fastOwners = fastOwners;
+            this.fastBase = fastBase;
         }
 
         private MemorySpace owner(int address) {
+            if (fastOwners != null) {
+                int index = address - fastBase;
+                if (index >= 0 && index < fastOwners.length) {
+                    return fastOwners[index];
+                }
+            }
             for (MemorySpace space : members) {
                 if (space.contains(address)) {
                     return space;
