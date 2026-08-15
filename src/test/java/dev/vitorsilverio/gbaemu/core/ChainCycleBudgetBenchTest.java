@@ -7,6 +7,7 @@ import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /// Local-only headless bench (task C5): measures wall-clock throughput of the JIT backend with
 /// block chaining OFF (baseline) vs ON at {@link GbaConsole#CHAIN_CYCLE_BUDGET} for the 5
@@ -29,6 +30,7 @@ class ChainCycleBudgetBenchTest {
 
     @Test
     void chainingDoesNotRegressThroughputOnTheReferenceGames() throws Exception {
+        assumeTrue(Files.exists(Path.of(GAMES.get(0))), "local ROMs (roms/) not present");
         System.err.printf("%-16s %12s %12s %8s%n", "game", "off (ms)", "budget=32 (ms)", "delta");
         for (String path : GAMES) {
             byte[] rom = Files.readAllBytes(Path.of(path));

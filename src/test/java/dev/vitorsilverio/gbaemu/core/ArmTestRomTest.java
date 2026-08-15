@@ -8,6 +8,7 @@ import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /// Integration regression test that runs the jsmolka ARM CPU test ROM end to end
 /// through the JIT block path and verifies that every instruction test passes.
@@ -21,7 +22,9 @@ class ArmTestRomTest {
 
     @Test
     void armTestRomReportsAllTestsPassed() throws Exception {
-        byte[] rom = Files.readAllBytes(Path.of("gba-tests/arm/arm.gba"));
+        Path romPath = Path.of("gba-tests/arm/arm.gba");
+        assumeTrue(Files.exists(romPath), "gba-tests submodule not present");
+        byte[] rom = Files.readAllBytes(romPath);
         GbaConsole console = GbaConsole.fromRom(rom);
         ArmCore cpu = console.cpu();
 

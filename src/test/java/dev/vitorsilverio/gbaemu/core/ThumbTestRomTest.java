@@ -8,6 +8,7 @@ import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /// Integration regression test that runs the jsmolka THUMB CPU test ROM end to end
 /// through the JIT block path (the path the desktop window uses) and verifies that
@@ -20,7 +21,9 @@ class ThumbTestRomTest {
 
     @Test
     void thumbTestRomReportsAllTestsPassed() throws Exception {
-        byte[] rom = Files.readAllBytes(Path.of("gba-tests/thumb/thumb.gba"));
+        Path romPath = Path.of("gba-tests/thumb/thumb.gba");
+        assumeTrue(Files.exists(romPath), "gba-tests submodule not present");
+        byte[] rom = Files.readAllBytes(romPath);
         GbaConsole console = GbaConsole.fromRom(rom);
         ArmCore cpu = console.cpu();
 

@@ -1,5 +1,7 @@
 # gbaemu
 
+[![CI](https://github.com/vitorsilverio/gbaemu/actions/workflows/ci.yml/badge.svg)](https://github.com/vitorsilverio/gbaemu/actions/workflows/ci.yml)
+
 Emulador de Game Boy Advance em Java, iniciado a partir das experiencias do `gbcemu` e usando a CPU ARM/THUMB do projeto `arm-jitter`.
 
 ## Referencia tecnica

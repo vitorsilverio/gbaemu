@@ -11,6 +11,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /// Runs the remaining jsmolka gba-tests ROMs that follow the on-screen result-register
 /// harness (result register 0 means every test passed, otherwise it holds the number of
@@ -35,6 +36,7 @@ class GbaTestRomSuiteTest {
     @ParameterizedTest(name = "{0} reports all tests passed")
     @MethodSource("harnessRoms")
     void romReportsAllTestsPassed(String romPath, int resultRegister) throws Exception {
+        assumeTrue(Files.exists(Path.of(romPath)), "gba-tests submodule not present");
         byte[] rom = Files.readAllBytes(Path.of(romPath));
         GbaConsole console = GbaConsole.fromRom(rom);
         ArmCore cpu = console.cpu();
