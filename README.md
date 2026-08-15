@@ -142,3 +142,11 @@ Tambem existem `GbaConsole.fromBiosAndRom(...)` (BIOS real) e
 - Mosaic na PPU (nenhum jogo validado usa de forma visivel).
 - Animacao da BIOS real lenta/entrecortada (task D6 no `arm-jitter/tasks/`).
 - ROMs de teste `bios.gba`/visual/unsafe do pacote gba-tests adiadas (demais passam).
+
+## Licença
+
+BSD 3-Clause — ver [LICENSE](LICENSE).
+
+Os binários de terceiros usados em testes e execução (BIOS, firmware, ROMs, kernels,
+`busybox`) **não** são cobertos por esta licença e não são redistribuídos por este projeto
+salvo quando a licença original permitir; ver o `README.md` do diretório correspondente.

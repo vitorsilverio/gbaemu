@@ -10,6 +10,14 @@
     <packaging>jar</packaging>
     <name>gbaemu</name>
 
+    <licenses>
+        <license>
+            <name>BSD-3-Clause</name>
+            <url>https://opensource.org/license/bsd-3-clause</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
     <dependencies>
         <dependency>
             <groupId>dev.vitorsilverio</groupId>
