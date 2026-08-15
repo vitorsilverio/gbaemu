@@ -76,13 +76,16 @@ Aberta por `Main` sem argumentos. Tudo configuravel por menus, sem parametros de
 
 ## Build
 
-Compilar e testar com **JBR 25** (a JDK do IntelliJ), nao o JDK do sistema, com a
-`arm-jitter` instalada no Maven local:
+Compilar e testar com **JBR 25** (a JDK do IntelliJ), nao o JDK do sistema. A `arm-jitter`
+resolve do **Maven Central** (`dev.vitorsilverio:arm-jitter:1.0.0`), sem `mvn install` local:
 
 ```bash
-mvn -f ../arm-jitter/pom.xml install
 mvn test
 ```
+
+Só é preciso instalar uma versão local da `arm-jitter` quando se está **desenvolvendo a lib
+junto com o gbaemu** (mudança ainda não publicada) — ver `arm-jitter/README.md`, seção
+"Desenvolvendo a lib junto com um consumidor".
 
 ## Uso
 
