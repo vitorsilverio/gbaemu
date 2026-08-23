@@ -79,7 +79,7 @@ Aberta por `Main` sem argumentos. Tudo configuravel por menus, sem parametros de
 ## Build
 
 Compilar e testar com **JBR 25** (a JDK do IntelliJ), nao o JDK do sistema. A `arm-jitter`
-resolve do **Maven Central** (`dev.vitorsilverio:arm-jitter:1.0.0`), sem `mvn install` local:
+resolve do **Maven Central** (`dev.vitorsilverio:arm-jitter:1.1.0`), sem `mvn install` local:
 
 ```bash
 mvn test
