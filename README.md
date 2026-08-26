@@ -148,6 +148,16 @@ Tambem existem `GbaConsole.fromBiosAndRom(...)` (BIOS real) e
 - Animacao da BIOS real lenta/entrecortada (task D6 no `arm-jitter/tasks/`).
 - ROMs de teste `bios.gba`/visual/unsafe do pacote gba-tests adiadas (demais passam).
 
+## Como contribuir
+
+Issues e pull requests são bem-vindos — ver [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Autor e contato
+
+Feito por [Vitor Silvério Rodrigues](https://vitorsilverio.dev/) — blog/currículo com mais
+detalhes sobre este e outros projetos. Contato: vitor.silverio.rodrigues@gmail.com ou uma
+[issue](https://github.com/vitorsilverio/gbaemu/issues) neste repositório.
+
 ## Licença
 
 BSD 3-Clause — ver [LICENSE](LICENSE).
